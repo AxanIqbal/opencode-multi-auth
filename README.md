@@ -20,17 +20,25 @@ The plugin registers itself as provider `openai`, replacing the built-in one. Ev
 
 ## Install
 
+Clone from GitHub, build, and add as a local plugin:
+
 ```bash
-opencode plugin add opencode-multi-auth
+git clone https://github.com/AxanIqbal/opencode-multi-auth.git
+cd opencode-multi-auth
+npm install && npm run build
+opencode plugin add "$(pwd)"
 ```
 
-Or manually add to `~/.config/opencode/opencode.json`:
+Or manually add the local path to `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-multi-auth"]
+  "plugin": ["/absolute/path/to/opencode-multi-auth"]
 }
 ```
+
+> `opencode plugin add` accepts npm module names, not GitHub repos. To enable
+> `opencode plugin add opencode-multi-auth`, publish this package to npm first.
 
 Then add an account:
 
