@@ -175,7 +175,6 @@ export class AccountManager {
     const startIdx = useRR ? this.roundRobinCursor : this.activeIndex;
     const now = Date.now();
 
-    // First pass: find a healthy account
     for (let i = 0; i < this.accounts.length; i++) {
       const idx = (startIdx + i) % this.accounts.length;
       const acct = this.accounts[idx];
@@ -189,22 +188,14 @@ export class AccountManager {
       }
     }
 
-    // Fallback: least rate-limited account
-    const fallback = this.pickBestFallback(model, now, new Set());
-    if (fallback) {
-      this.activeIndex = fallback.index;
-      if (useRR) {
-        this.roundRobinCursor = (fallback.index + 1) % this.accounts.length;
-      }
-      fallback.lastUsed = now;
-    }
-    return fallback;
+    return null;
   }
 
   /** Pick the next available account, excluding specific indices (for retry). */
   async selectExcluding(
     exclude: Set<number>,
     model?: string,
+    allowFallback = true,
   ): Promise<ManagedAccount | null> {
     if (this.accounts.length === 0) return null;
     const now = Date.now();
@@ -227,6 +218,7 @@ export class AccountManager {
       }
     }
 
+    if (!allowFallback) return null;
     return this.pickBestFallback(model, now, exclude);
   }
 
@@ -240,6 +232,7 @@ export class AccountManager {
     } else {
       account.globalRateLimitReset = resetTime;
     }
+    this.save();
     if (this.config.debug) {
       const id = account.label || account.email || `acc-${account.index}`;
       console.log(`[multi-auth] ${id} rate-limited until ${new Date(resetTime).toISOString()}`);
@@ -337,6 +330,32 @@ export class AccountManager {
     return null;
   }
 
+  getEarliestReset(model?: string): number | undefined {
+    const now = Date.now();
+    let earliest: number | undefined;
+
+    for (const acct of this.accounts) {
+      if (acct.consecutiveFailures >= 3) continue;
+
+      if (acct.globalRateLimitReset && acct.globalRateLimitReset > now) {
+        if (earliest === undefined || acct.globalRateLimitReset < earliest) {
+          earliest = acct.globalRateLimitReset;
+        }
+      }
+
+      if (model && this.config.perModelRateLimits) {
+        const modelReset = acct.rateLimitResets[model];
+        if (modelReset && modelReset > now) {
+          if (earliest === undefined || modelReset < earliest) {
+            earliest = modelReset;
+          }
+        }
+      }
+    }
+
+    return earliest;
+  }
+
   // ── Private helpers ──────────────────────────────────────
 
   private initStrategy(): void {
@@ -405,7 +424,7 @@ export class AccountManager {
     if (!window?.usedPercent || window.usedPercent < this.config.quotaCriticalThresholdPercent) {
       return false;
     }
-    return !window.resetsAt || window.resetsAt > now;
+    return !!window.resetsAt && window.resetsAt > now;
   }
 
   private quotaScore(account: ManagedAccount, model: string | undefined, now: number): number {

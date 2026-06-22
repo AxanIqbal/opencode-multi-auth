@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { tool, type Plugin, type PluginInput, type AuthOuathResult } from "@opencode-ai/plugin";
 import type { Auth } from "@opencode-ai/sdk";
 import { AccountManager } from "./accounts/manager.js";
-import type { ManagedAccount, PluginConfig, QuotaSnapshot, QuotaWindow } from "./accounts/types.js";
+import type { ManagedAccount, PluginConfig, QuotaSnapshot } from "./accounts/types.js";
 import { resolveConfig } from "./accounts/types.js";
 import {
   decodeJWT,
@@ -86,79 +86,47 @@ function parseSSE(body: string): SSEData[] {
   return events;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  return value as Record<string, unknown>;
-}
+// ── Quota extraction helpers ──────────────────────────────
 
-function numberValue(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
+function extractQuotaFromErrorBody(body: string): QuotaSnapshot | undefined {
+  try {
+    const json = JSON.parse(body);
+    const resetsAtField =
+      json?.error?.details?.resets_at ??
+      json?.resets_at;
+    if (typeof resetsAtField !== "undefined") {
+      const epoch =
+        typeof resetsAtField === "number"
+          ? resetsAtField < 1_000_000_000_000
+            ? resetsAtField * 1000
+            : resetsAtField
+          : new Date(String(resetsAtField)).getTime();
+      if (Number.isFinite(epoch)) {
+        return { primary: { resetsAt: epoch }, updatedAt: Date.now() };
+      }
+    }
+  } catch { /* ignore parse errors */ }
   return undefined;
 }
 
-function epochMs(value: unknown): number | undefined {
-  const numeric = numberValue(value);
-  if (numeric !== undefined) return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
-  if (typeof value === "string") {
-    const parsed = new Date(value).getTime();
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
-}
-
-function quotaWindow(value: unknown): QuotaWindow | undefined {
-  const record = asRecord(value);
-  if (!record) return undefined;
-  const usedPercent = numberValue(record.used_percent ?? record.usedPercent);
-  const windowMinutes = numberValue(record.window_minutes ?? record.windowMinutes);
-  const resetsAt = epochMs(record.resets_at ?? record.resetsAt);
-  if (usedPercent === undefined && windowMinutes === undefined && resetsAt === undefined) return undefined;
-  return { usedPercent, windowMinutes, resetsAt };
-}
-
-function findRateLimits(value: unknown, depth = 0): Record<string, unknown> | undefined {
-  if (depth > 4) return undefined;
-  const record = asRecord(value);
-  if (!record) return undefined;
-
-  const direct = asRecord(record.rate_limits ?? record.rateLimits);
-  if (direct) return direct;
-
-  if (quotaWindow(record.primary) || quotaWindow(record.secondary)) return record;
-
-  for (const nested of Object.values(record)) {
-    const found = findRateLimits(nested, depth + 1);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function quotaSnapshotFromEvents(events: SSEData[]): QuotaSnapshot | undefined {
-  for (const evt of events) {
-    try {
-      const parsed = JSON.parse(evt.data) as unknown;
-      const limits = findRateLimits(parsed);
-      if (!limits) continue;
-
-      const primary = quotaWindow(limits.primary);
-      const secondary = quotaWindow(limits.secondary);
-      if (!primary && !secondary) continue;
-
-      const planType = typeof limits.plan_type === "string" ? limits.plan_type
-        : typeof limits.planType === "string" ? limits.planType
-          : undefined;
-      const rateLimitReachedType = typeof limits.rate_limit_reached_type === "string"
-        ? limits.rate_limit_reached_type
-        : typeof limits.rateLimitReachedType === "string"
-          ? limits.rateLimitReachedType
-          : undefined;
-
-      return { primary, secondary, planType, rateLimitReachedType, updatedAt: Date.now() };
-    } catch {}
+function extractQuotaFromHeaders(headers: Headers): QuotaSnapshot | undefined {
+  const remaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
+  const reset = headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset");
+  if (remaining || reset) {
+    const snapshot: QuotaSnapshot = { updatedAt: Date.now() };
+    const primary: { usedPercent?: number; resetsAt?: number } = {};
+    if (remaining) {
+      const n = parseInt(remaining, 10);
+      if (Number.isFinite(n)) primary.usedPercent = Math.max(0, Math.min(100, 100 - n));
+    }
+    if (reset) {
+      const epoch = parseInt(reset, 10);
+      if (Number.isFinite(epoch)) primary.resetsAt = epoch * 1000;
+    }
+    if (primary.usedPercent !== undefined || primary.resetsAt !== undefined) {
+      snapshot.primary = primary;
+    }
+    return snapshot;
   }
   return undefined;
 }
@@ -252,12 +220,9 @@ function toResponsesBody(chatBody: Record<string, unknown>): Record<string, unkn
 async function wrapSSEAsChatCompletion(
   sseResponse: Response,
   model: string | undefined,
-  onQuota?: (snapshot: QuotaSnapshot) => void,
 ): Promise<Response> {
   const sseText = await sseResponse.text();
   const events = parseSSE(sseText);
-  const quota = quotaSnapshotFromEvents(events);
-  if (quota) onQuota?.(quota);
   const completion = buildChatCompletionFromSSE(events, model || "");
   return new Response(JSON.stringify(completion), {
     status: 200,
@@ -346,16 +311,22 @@ function formatQuota(quota: QuotaSnapshot | undefined, now: number): string {
   if (!quota) return "";
 
   const parts: string[] = [];
-  const primaryUsed = quota.primary?.usedPercent;
-  if (typeof primaryUsed === "number") {
-    const reset = formatReset(quota.primary?.resetsAt, now);
-    parts.push(`5h ${Math.max(0, Math.round(100 - primaryUsed))}% left${reset ? `, ${reset}` : ""}`);
+  if (quota.primary) {
+    const reset = formatReset(quota.primary.resetsAt, now);
+    if (typeof quota.primary.usedPercent === "number") {
+      parts.push(`5h ${Math.max(0, Math.round(100 - quota.primary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
+    } else if (reset) {
+      parts.push(reset);
+    }
   }
 
-  const secondaryUsed = quota.secondary?.usedPercent;
-  if (typeof secondaryUsed === "number") {
-    const reset = formatReset(quota.secondary?.resetsAt, now);
-    parts.push(`weekly ${Math.max(0, Math.round(100 - secondaryUsed))}% left${reset ? `, ${reset}` : ""}`);
+  if (quota.secondary) {
+    const reset = formatReset(quota.secondary.resetsAt, now);
+    if (typeof quota.secondary.usedPercent === "number") {
+      parts.push(`weekly ${Math.max(0, Math.round(100 - quota.secondary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
+    } else if (reset) {
+      parts.push(reset);
+    }
   }
 
   return parts.length > 0 ? ` (${parts.join("; ")})` : "";
@@ -432,12 +403,19 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       const model = extractModel(bodyStr);
       const now = Date.now();
 
+      function retryAfterResponse(msg: string): Response {
+        const reset = manager.getEarliestReset(model);
+        const hdrs: Record<string, string> = { "Content-Type": "application/json" };
+        if (reset) {
+          const secs = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
+          hdrs["Retry-After"] = String(secs);
+        }
+        return new Response(JSON.stringify({ error: msg }), { status: 503, headers: hdrs });
+      }
+
       let account = await manager.select(model);
       if (!account) {
-        return new Response(
-          JSON.stringify({ error: "No available OpenAI accounts" }),
-          { status: 503, headers: { "Content-Type": "application/json" } },
-        );
+        return retryAfterResponse("No available OpenAI accounts");
       }
 
       // ── Toast: show which account is active ─────────
@@ -558,6 +536,11 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         const retryBody = await response.clone().text().catch(() => undefined);
         const cooldown = parseRetryAfter(response, retryBody);
 
+        if (retryBody) {
+          const quota = extractQuotaFromErrorBody(retryBody);
+          if (quota) manager.updateQuota(account, quota, model);
+        }
+
         if (debug) {
           console.log(
             `[multi-auth] Rate limit (${response.status}) on ${account.label || account.email || account.index}, cooldown ${cooldown}ms`,
@@ -576,8 +559,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           );
         }
 
-        // Rotate to next available account
-        const next = await manager.selectExcluding(new Set([account.index]), model);
+        const next = await manager.selectExcluding(new Set([account.index]), model, false);
         if (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${account.index + 1}`;
@@ -592,24 +574,24 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
           const retryResponse = await fetch(requestUrl, withAccount(next));
 
-          if (debug && isRateLimit(retryResponse.status)) {
-            console.log(`[multi-auth] Retry also rate-limited (${retryResponse.status})`);
+          if (isChatEndpoint && retryResponse.ok) {
+            return wrapSSEAsChatCompletion(retryResponse, model);
           }
 
-          // Post-process SSE if it succeeded and this is chat
-          if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
-              manager.updateQuota(next, quota, model);
-            });
+          if (isRateLimit(retryResponse.status)) {
+            if (debug) {
+              console.log(`[multi-auth] Retry also rate-limited (${retryResponse.status})`);
+            }
+            const retryBody = await retryResponse.clone().text().catch(() => undefined);
+            manager.markRateLimited(next, parseRetryAfter(retryResponse, retryBody), model);
           }
-          return retryResponse;
         }
 
         // All accounts exhausted
         if (!cfg.quietMode) {
           showToast(client, "[multi-auth] All accounts rate-limited. Waiting for cooldown.", "error");
         }
-        return response;
+        return retryAfterResponse("All OpenAI accounts are rate-limited");
       }
 
       // ── Handle auth errors ────────────────────────
@@ -619,9 +601,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (refreshed) {
           const retryResponse = await fetch(requestUrl, withAccount(account));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
-              manager.updateQuota(account, quota, model);
-            });
+            return wrapSSEAsChatCompletion(retryResponse, model);
           }
           return retryResponse;
         }
@@ -632,9 +612,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           const retryResponse = await fetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
-              manager.updateQuota(next, quota, model);
-            });
+            return wrapSSEAsChatCompletion(retryResponse, model);
           }
           return retryResponse;
         }
@@ -654,9 +632,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           const retryResponse = await fetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
-              manager.updateQuota(next, quota, model);
-            });
+            return wrapSSEAsChatCompletion(retryResponse, model);
           }
           return retryResponse;
         }
@@ -664,9 +640,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
       // ── Post-process SSE for successful chat completions ──
       if (isChatEndpoint && response.ok) {
-        return wrapSSEAsChatCompletion(response, model, (quota) => {
-          manager.updateQuota(account, quota, model);
-        });
+        const quota = extractQuotaFromHeaders(response.headers);
+        if (quota) manager.updateQuota(account, quota, model);
+        return wrapSSEAsChatCompletion(response, model);
       }
 
       return response;
