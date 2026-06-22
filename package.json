@@ -1,0 +1,51 @@
+{
+  "name": "opencode-multi-auth",
+  "version": "1.0.0",
+  "description": "OpenCode plugin for multi-account OpenAI rotation with access/refresh token support. Auto-rotate on rate limits.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "author": "ahsan",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anomalyco/opencode"
+  },
+  "keywords": [
+    "opencode",
+    "openai",
+    "codex",
+    "chatgpt",
+    "oauth",
+    "plugin",
+    "auth",
+    "multi-account",
+    "rate-limit",
+    "rotation"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "bin": {
+    "opencode-multi-auth": "./scripts/install.js"
+  },
+  "files": [
+    "dist/",
+    "config/",
+    "scripts/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.0.150"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.0.150",
+    "@opencode-ai/sdk": "^1.0.150",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.5.0"
+  }
+}
