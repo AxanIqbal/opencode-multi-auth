@@ -8,4 +8,4 @@ openai-accounts.json
 auth.json
 
 .DS_Store
-./dist
+/dist
