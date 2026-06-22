@@ -1,4 +1,16 @@
 /** Single managed account in the pool */
+export interface QuotaWindow {
+    usedPercent?: number;
+    windowMinutes?: number;
+    resetsAt?: number;
+}
+export interface QuotaSnapshot {
+    primary?: QuotaWindow;
+    secondary?: QuotaWindow;
+    planType?: string;
+    rateLimitReachedType?: string;
+    updatedAt: number;
+}
 export interface ManagedAccount {
     /** Index within the accounts array (auto-assigned) */
     index: number;
@@ -26,6 +38,8 @@ export interface ManagedAccount {
     rateLimitResets: Record<string, number>;
     /** Global rate-limit reset (when no model context) */
     globalRateLimitReset?: number;
+    quota?: QuotaSnapshot;
+    quotaByModel?: Record<string, QuotaSnapshot>;
     /** Consecutive failures for backoff */
     consecutiveFailures: number;
     /** Whether a token refresh is in flight */
@@ -45,7 +59,7 @@ export interface AccountsStore {
 /** Plugin configuration from env / opencode.json provider options */
 export interface PluginConfig {
     /** account-selection strategy */
-    accountSelectionStrategy: "sticky" | "round-robin";
+    accountSelectionStrategy: "sticky" | "round-robin" | "quota-aware";
     /** Print debug logs */
     debug: boolean;
     /** Suppress toast / console messages */
@@ -60,6 +74,7 @@ export interface PluginConfig {
     perModelRateLimits: boolean;
     /** Cooldown in ms after a rate-limit (default: 60s) */
     rateLimitCooldownMs: number;
+    quotaCriticalThresholdPercent: number;
 }
 export declare const DEFAULT_CONFIG: PluginConfig;
 /** Merge partial config with defaults */

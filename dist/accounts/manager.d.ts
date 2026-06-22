@@ -1,4 +1,4 @@
-import type { ManagedAccount, PluginConfig } from "./types.js";
+import type { ManagedAccount, PluginConfig, QuotaSnapshot } from "./types.js";
 /**
  * Manages a pool of OpenAI OAuth accounts with automatic rotation,
  * health tracking, and token refresh.
@@ -32,6 +32,7 @@ export declare class AccountManager {
     selectExcluding(exclude: Set<number>, model?: string): Promise<ManagedAccount | null>;
     /** Mark an account as rate-limited. */
     markRateLimited(account: ManagedAccount, cooldownMs: number, model?: string): void;
+    updateQuota(account: ManagedAccount, snapshot: QuotaSnapshot, model?: string): void;
     /** Mark token refresh failure and increment backoff. */
     markRefreshFailed(account: ManagedAccount, error: string): void;
     /** Ensure the account has a valid (non-expired) access token. */
@@ -42,6 +43,10 @@ export declare class AccountManager {
     private initStrategy;
     private normalizeIndices;
     private isAvailable;
+    private pickQuotaAware;
+    private quotaFor;
+    private isQuotaCritical;
+    private quotaScore;
     private pickBestFallback;
 }
 //# sourceMappingURL=manager.d.ts.map

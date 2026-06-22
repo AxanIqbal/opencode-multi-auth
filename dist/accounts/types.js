@@ -1,5 +1,5 @@
 export const DEFAULT_CONFIG = {
-    accountSelectionStrategy: "sticky",
+    accountSelectionStrategy: "quota-aware",
     debug: false,
     quietMode: false,
     pidOffsetEnabled: false,
@@ -7,6 +7,7 @@ export const DEFAULT_CONFIG = {
     removeOnInvalidGrant: true,
     perModelRateLimits: true,
     rateLimitCooldownMs: 60_000,
+    quotaCriticalThresholdPercent: 95,
 };
 /** Merge partial config with defaults */
 export function resolveConfig(partial) {
