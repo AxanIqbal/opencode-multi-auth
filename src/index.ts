@@ -409,6 +409,8 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (reset) {
           const secs = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
           hdrs["Retry-After"] = String(secs);
+        } else {
+          hdrs["Retry-After"] = String(Math.ceil(cfg.rateLimitCooldownMs / 1000));
         }
         return new Response(JSON.stringify({ error: msg }), { status: 503, headers: hdrs });
       }

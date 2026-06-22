@@ -209,10 +209,22 @@ export function parseRetryAfter(response: Response, body?: string): number {
         json?.reset_time ??
         json?.retry_after;
       if (resetField) {
-        const ms = typeof resetField === "number"
-          ? resetField * 1000  // seconds
-          : new Date(resetField).getTime() - Date.now();
-        if (!isNaN(ms) && ms > 0) return ms;
+        if (typeof resetField === "number") {
+          // Relative seconds (cooldown duration) vs absolute epoch timestamp
+          if (resetField < 1_000_000) {
+            // < ~11.6 days → it's relative seconds to wait
+            return resetField * 1000;
+          }
+          // Absolute epoch: convert to ms and compute relative duration
+          const epochMs = resetField < 1_000_000_000_000
+            ? resetField * 1000  // epoch seconds → ms
+            : resetField;        // already ms
+          const ms = epochMs - Date.now();
+          if (ms > 0) return ms;
+        } else {
+          const ms = new Date(resetField).getTime() - Date.now();
+          if (!isNaN(ms) && ms > 0) return ms;
+        }
       }
     } catch { /* ignore */ }
   }
