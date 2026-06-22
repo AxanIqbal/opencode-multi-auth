@@ -205,7 +205,10 @@ export function parseRetryAfter(response: Response, body?: string): number {
       // Common field names across providers
       const resetField =
         json?.error?.details?.resets_at ??
+        json?.error?.resets_at ??
         json?.resets_at ??
+        json?.error?.resets_in_seconds ??
+        json?.resets_in_seconds ??
         json?.reset_time ??
         json?.retry_after;
       if (resetField) {
@@ -229,6 +232,20 @@ export function parseRetryAfter(response: Response, body?: string): number {
     } catch { /* ignore */ }
   }
 
-  // 3. Default 60s
+  // 3. Try x-ratelimit-reset-* headers (epoch seconds)
+  const rlReset =
+    response.headers.get("x-ratelimit-reset-requests") ??
+    response.headers.get("x-ratelimit-reset-tokens") ??
+    response.headers.get("x-ratelimit-reset");
+  if (rlReset) {
+    const epoch = parseInt(rlReset, 10);
+    if (Number.isFinite(epoch)) {
+      // Header may be epoch seconds or a relative seconds string
+      const ms = epoch < 1_000_000_000_000 ? epoch * 1000 - Date.now() : epoch - Date.now();
+      if (ms > 0) return ms;
+    }
+  }
+
+  // 4. Default 60s
   return 60_000;
 }

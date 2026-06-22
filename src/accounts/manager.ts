@@ -13,6 +13,22 @@ export class AccountManager {
   private roundRobinCursor = 0;
   private strategyInitialized = false;
   private config: PluginConfig;
+  /** Serializes select/selectExcluding to prevent concurrent same-account selection */
+  private selectMutex: Promise<void> = Promise.resolve();
+  /** Accounts currently being used by an in-flight request */
+  private pendingAccounts = new Set<number>();
+
+  private async withSelectMutex<T>(fn: () => T): Promise<T> {
+    let unlock: () => void;
+    const next = new Promise<void>((r) => (unlock = r));
+    await this.selectMutex;
+    this.selectMutex = next;
+    try {
+      return await fn();
+    } finally {
+      unlock!();
+    }
+  }
 
   constructor(config?: Partial<PluginConfig>) {
     this.config = resolveConfig(config);
@@ -32,8 +48,37 @@ export class AccountManager {
     }
   }
 
-  /** Save accounts to disk atomically-ish. */
+  /** Save accounts to disk, merging concurrent changes from other processes. */
   save(): void {
+    const diskStore = readJSON<AccountsStore>(ACCOUNTS_FILE);
+    const diskAccounts: ManagedAccount[] =
+      diskStore?.version === 1 && Array.isArray(diskStore.accounts)
+        ? diskStore.accounts.map((a) => ({ ...a }))
+        : [];
+
+    const matchKey = (a: ManagedAccount): string =>
+      a.userId && a.accountId ? `${a.userId}/${a.accountId}` : a.refresh;
+
+    const diskIndex = new Map<string, ManagedAccount>();
+    for (const d of diskAccounts) diskIndex.set(matchKey(d), d);
+
+    for (const mem of this.accounts) {
+      const key = matchKey(mem);
+      const existing = diskIndex.get(key);
+      if (existing) {
+        const mergedResets = { ...existing.rateLimitResets, ...mem.rateLimitResets };
+        Object.assign(existing, mem, { rateLimitResets: mergedResets });
+      } else {
+        diskAccounts.push({ ...mem });
+      }
+    }
+
+    this.accounts = diskAccounts;
+    this.normalizeIndices();
+    if (this.activeIndex >= this.accounts.length) this.activeIndex = 0;
+    this.roundRobinCursor = this.activeIndex;
+    this.strategyInitialized = false;
+
     const store: AccountsStore = {
       version: 1,
       accounts: this.accounts,
@@ -41,6 +86,16 @@ export class AccountManager {
       roundRobinCursor: this.roundRobinCursor,
     };
     writeJSON(ACCOUNTS_FILE, store);
+
+    if (this.config.debug) {
+      for (const acct of this.accounts) {
+        const id = acct.label || acct.email || `acc-${acct.index}`;
+        const resets = Object.entries(acct.rateLimitResets ?? {})
+          .map(([m, t]) => `${m}=${new Date(t).toISOString()}`)
+          .join(", ");
+        if (resets) console.log(`[multi-auth] save ${id}: ${resets}`);
+      }
+    }
   }
 
   /** Import an existing credential from OpenCode's own auth store. */
@@ -159,36 +214,40 @@ export class AccountManager {
 
   /** Pick the next available account (for a new request). */
   async select(model?: string): Promise<ManagedAccount | null> {
-    if (this.accounts.length === 0) return null;
-    this.initStrategy();
+    return this.withSelectMutex(async () => {
+      if (this.accounts.length === 0) return null;
+      this.initStrategy();
 
-    if (this.config.accountSelectionStrategy === "quota-aware") {
-      const selected = this.pickQuotaAware(model, Date.now(), new Set());
-      if (selected) {
-        this.activeIndex = selected.index;
-        selected.lastUsed = Date.now();
-        return selected;
-      }
-    }
-
-    const useRR = this.config.accountSelectionStrategy === "round-robin";
-    const startIdx = useRR ? this.roundRobinCursor : this.activeIndex;
-    const now = Date.now();
-
-    for (let i = 0; i < this.accounts.length; i++) {
-      const idx = (startIdx + i) % this.accounts.length;
-      const acct = this.accounts[idx];
-      if (this.isAvailable(acct, model, now)) {
-        this.activeIndex = idx;
-        if (useRR) {
-          this.roundRobinCursor = (idx + 1) % this.accounts.length;
+      if (this.config.accountSelectionStrategy === "quota-aware") {
+        const selected = this.pickQuotaAware(model, Date.now(), new Set());
+        if (selected) {
+          this.activeIndex = selected.index;
+          selected.lastUsed = Date.now();
+          this.pendingAccounts.add(selected.index);
+          return selected;
         }
-        acct.lastUsed = now;
-        return acct;
       }
-    }
 
-    return null;
+      const useRR = this.config.accountSelectionStrategy === "round-robin";
+      const startIdx = useRR ? this.roundRobinCursor : this.activeIndex;
+      const now = Date.now();
+
+      for (let i = 0; i < this.accounts.length; i++) {
+        const idx = (startIdx + i) % this.accounts.length;
+        const acct = this.accounts[idx];
+        if (this.isAvailable(acct, model, now)) {
+          this.activeIndex = idx;
+          if (useRR) {
+            this.roundRobinCursor = (idx + 1) % this.accounts.length;
+          }
+          acct.lastUsed = now;
+          this.pendingAccounts.add(acct.index);
+          return acct;
+        }
+      }
+
+      return null;
+    });
   }
 
   /** Pick the next available account, excluding specific indices (for retry). */
@@ -197,40 +256,49 @@ export class AccountManager {
     model?: string,
     allowFallback = true,
   ): Promise<ManagedAccount | null> {
-    if (this.accounts.length === 0) return null;
-    const now = Date.now();
+    return this.withSelectMutex(async () => {
+      if (this.accounts.length === 0) return null;
+      const now = Date.now();
 
-    if (this.config.accountSelectionStrategy === "quota-aware") {
-      const selected = this.pickQuotaAware(model, now, exclude);
-      if (selected) {
-        this.activeIndex = selected.index;
-        selected.lastUsed = now;
-        return selected;
+      if (this.config.accountSelectionStrategy === "quota-aware") {
+        const selected = this.pickQuotaAware(model, now, exclude);
+        if (selected) {
+          this.activeIndex = selected.index;
+          selected.lastUsed = now;
+          this.pendingAccounts.add(selected.index);
+          return selected;
+        }
       }
-    }
 
-    for (const acct of this.accounts) {
-      if (exclude.has(acct.index)) continue;
-      if (this.isAvailable(acct, model, now)) {
-        this.activeIndex = acct.index;
-        acct.lastUsed = now;
-        return acct;
+      for (const acct of this.accounts) {
+        if (exclude.has(acct.index)) continue;
+        if (this.isAvailable(acct, model, now)) {
+          this.activeIndex = acct.index;
+          acct.lastUsed = now;
+          this.pendingAccounts.add(acct.index);
+          return acct;
+        }
       }
-    }
 
-    if (!allowFallback) return null;
-    return this.pickBestFallback(model, now, exclude);
+      if (!allowFallback) return null;
+      return this.pickBestFallback(model, now, exclude);
+    });
+  }
+
+  releasePending(index: number): void {
+    this.pendingAccounts.delete(index);
   }
 
   // ── Health ───────────────────────────────────────────────
 
   /** Mark an account as rate-limited. */
   markRateLimited(account: ManagedAccount, cooldownMs: number, model?: string): void {
+    const target = this.resolveAccount(account);
     const resetTime = Date.now() + cooldownMs;
     if (model && this.config.perModelRateLimits) {
-      account.rateLimitResets[model] = resetTime;
+      target.rateLimitResets[model] = resetTime;
     } else {
-      account.globalRateLimitReset = resetTime;
+      target.globalRateLimitReset = resetTime;
     }
     this.save();
     if (this.config.debug) {
@@ -240,12 +308,13 @@ export class AccountManager {
   }
 
   updateQuota(account: ManagedAccount, snapshot: QuotaSnapshot, model?: string): void {
-    account.quota = snapshot;
+    const target = this.resolveAccount(account);
+    target.quota = snapshot;
     if (model && this.config.perModelRateLimits) {
-      account.quotaByModel = account.quotaByModel ?? {};
-      account.quotaByModel[model] = snapshot;
+      target.quotaByModel = target.quotaByModel ?? {};
+      target.quotaByModel[model] = snapshot;
     }
-    if (snapshot.planType) account.planType = snapshot.planType;
+    if (snapshot.planType) target.planType = snapshot.planType;
     this.save();
   }
 
@@ -358,6 +427,24 @@ export class AccountManager {
 
   // ── Private helpers ──────────────────────────────────────
 
+  /** Find the current account object in this.accounts, handling orphaned references. */
+  private resolveAccount(account: ManagedAccount): ManagedAccount {
+    const key =
+      account.userId && account.accountId
+        ? `${account.userId}/${account.accountId}`
+        : account.refresh;
+    const found = this.accounts.find((a) => {
+      const aKey = a.userId && a.accountId ? `${a.userId}/${a.accountId}` : a.refresh;
+      return aKey === key;
+    });
+    if (this.config.debug && found && found !== account) {
+      console.log(
+        `[multi-auth] resolveAccount: orphaned ref for ${account.label || account.email || `acc-${account.index}`} → resolved to fresh object`,
+      );
+    }
+    return found ?? account;
+  }
+
   private initStrategy(): void {
     if (this.strategyInitialized) return;
     this.normalizeIndices();
@@ -377,6 +464,7 @@ export class AccountManager {
 
   private isAvailable(account: ManagedAccount, model: string | undefined, now: number): boolean {
     if (account.consecutiveFailures >= 3) return false;
+    if (this.pendingAccounts.has(account.index)) return false;
     if (account.globalRateLimitReset && account.globalRateLimitReset > now) return false;
     if (model && this.config.perModelRateLimits) {
       const modelReset = account.rateLimitResets[model];

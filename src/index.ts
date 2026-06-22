@@ -93,6 +93,7 @@ function extractQuotaFromErrorBody(body: string): QuotaSnapshot | undefined {
     const json = JSON.parse(body);
     const resetsAtField =
       json?.error?.details?.resets_at ??
+      json?.error?.resets_at ??
       json?.resets_at;
     if (typeof resetsAtField !== "undefined") {
       const epoch =
@@ -110,8 +111,17 @@ function extractQuotaFromErrorBody(body: string): QuotaSnapshot | undefined {
 }
 
 function extractQuotaFromHeaders(headers: Headers): QuotaSnapshot | undefined {
-  const remaining = headers.get("x-ratelimit-remaining") ?? headers.get("ratelimit-remaining");
-  const reset = headers.get("x-ratelimit-reset") ?? headers.get("ratelimit-reset");
+  // Check both old singular and new suffixed header names (responses API)
+  const remaining =
+    headers.get("x-ratelimit-remaining-requests") ??
+    headers.get("x-ratelimit-remaining-tokens") ??
+    headers.get("x-ratelimit-remaining") ??
+    headers.get("ratelimit-remaining");
+  const reset =
+    headers.get("x-ratelimit-reset-requests") ??
+    headers.get("x-ratelimit-reset-tokens") ??
+    headers.get("x-ratelimit-reset") ??
+    headers.get("ratelimit-reset");
   if (remaining || reset) {
     const snapshot: QuotaSnapshot = { updatedAt: Date.now() };
     const primary: { usedPercent?: number; resetsAt?: number } = {};
@@ -394,6 +404,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
     _provider: unknown,
   ): Promise<Record<string, unknown>> {
 
+    // Capture original fetch to avoid re-entrancy when our customFetch is the global interceptor
+    const originalFetch = globalThis.fetch;
+
     // ── Custom fetch ──────────────────────────────────
     async function customFetch(
       input: Request | string | URL,
@@ -402,14 +415,28 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       const bodyStr = typeof init?.body === "string" ? init.body : undefined;
       const model = extractModel(bodyStr);
       const now = Date.now();
+      let lastRateLimitHeaders: Record<string, string> | undefined;
 
       function retryAfterResponse(msg: string): Response {
         const reset = manager.getEarliestReset(model);
         const hdrs: Record<string, string> = { "Content-Type": "application/json" };
+
+        // Forward any rate-limit headers from the actual API 429 response.
+        // This lets OpenCode's session-level retry read retry-after-ms and
+        // x-ratelimit-* headers for more precise timing.
+        if (lastRateLimitHeaders) {
+          for (const key of ["retry-after-ms", "retry-after", "retry-after-ms"] as const) {
+            if (lastRateLimitHeaders[key]) hdrs[key] = lastRateLimitHeaders[key];
+          }
+          for (const [key, val] of Object.entries(lastRateLimitHeaders)) {
+            if (key.startsWith("x-ratelimit-")) hdrs[key] = val;
+          }
+        }
+
         if (reset) {
           const secs = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
           hdrs["Retry-After"] = String(secs);
-        } else {
+        } else if (!hdrs["retry-after"]) {
           hdrs["Retry-After"] = String(Math.ceil(cfg.rateLimitCooldownMs / 1000));
         }
         return new Response(JSON.stringify({ error: msg }), { status: 503, headers: hdrs });
@@ -441,22 +468,26 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       const tokenOk = await manager.ensureValidToken(account);
       if (!tokenOk) {
         // Try next account
-        const next = await manager.selectExcluding(new Set([account.index]), model);
+        const prev = account.index;
+        const next = await manager.selectExcluding(new Set([prev]), model);
         if (next) {
           if (!cfg.quietMode) {
-            const from = account.label || account.email || `Acct ${account.index + 1}`;
+            const from = account.label || account.email || `Acct ${prev + 1}`;
             const to = next.label || next.email || `Acct ${next.index + 1}`;
             showToast(client, `[multi-auth] Token refresh failed for ${from}, switching to ${to}`, "warning");
           }
+          manager.releasePending(prev);
           account = next;
           const tokenOk2 = await manager.ensureValidToken(account);
           if (!tokenOk2) {
+            manager.releasePending(account.index);
             return new Response(
               JSON.stringify({ error: "Token refresh failed for all available accounts" }),
               { status: 401, headers: { "Content-Type": "application/json" } },
             );
           }
         } else {
+          manager.releasePending(prev);
           return new Response(
             JSON.stringify({ error: "Token refresh failed, no fallback accounts" }),
             { status: 401, headers: { "Content-Type": "application/json" } },
@@ -531,22 +562,44 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         return { ...init, headers: h };
       }
 
-      let response = await fetch(requestUrl, requestInit);
+      let response = await originalFetch(requestUrl, requestInit);
 
       // ── Handle rate limits ────────────────────────
       if (isRateLimit(response.status)) {
+        const rlHeaders = response.headers;
+        if (rlHeaders) {
+          lastRateLimitHeaders = {};
+          rlHeaders.forEach((val, key) => {
+            const lk = key.toLowerCase();
+            if (lk.startsWith("x-ratelimit-") || lk === "retry-after-ms" || lk === "retry-after") {
+              lastRateLimitHeaders![lk] = val;
+            }
+          });
+        }
+
         const retryBody = await response.clone().text().catch(() => undefined);
-        const cooldown = parseRetryAfter(response, retryBody);
+        let cooldown = parseRetryAfter(response, retryBody);
 
         if (retryBody) {
           const quota = extractQuotaFromErrorBody(retryBody);
           if (quota) manager.updateQuota(account, quota, model);
+
+          if (cooldown === 60_000) {
+            try {
+              const body = JSON.parse(retryBody);
+              const errType = body?.error?.code ?? body?.error?.type ?? "";
+              if (errType === "insufficient_quota" || errType === "usage_limit_reached") {
+                cooldown = 3_600_000;
+              }
+            } catch {}
+          }
         }
 
         if (debug) {
           console.log(
             `[multi-auth] Rate limit (${response.status}) on ${account.label || account.email || account.index}, cooldown ${cooldown}ms`,
           );
+          if (retryBody) console.log(`[multi-auth] Body: ${retryBody.slice(0, 300)}`);
         }
 
         manager.markRateLimited(account, cooldown, model);
@@ -561,8 +614,10 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           );
         }
 
-        const next = await manager.selectExcluding(new Set([account.index]), model, false);
-        if (next) {
+        const excluded = new Set<number>([account.index]);
+        manager.releasePending(account.index);
+        let next = await manager.selectExcluding(excluded, model, false);
+        while (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${account.index + 1}`;
             const to = next.label || next.email || `Acct ${next.index + 1}`;
@@ -574,19 +629,51 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             console.log(`[multi-auth] Retrying on ${next.label || next.email || `acc-${next.index}`}`);
           }
 
-          const retryResponse = await fetch(requestUrl, withAccount(next));
+          const retryResponse = await originalFetch(requestUrl, withAccount(next));
 
           if (isChatEndpoint && retryResponse.ok) {
+            manager.releasePending(next.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
+          }
+          if (retryResponse.ok) {
+            manager.releasePending(next.index);
+            return retryResponse;
           }
 
           if (isRateLimit(retryResponse.status)) {
             if (debug) {
               console.log(`[multi-auth] Retry also rate-limited (${retryResponse.status})`);
             }
+            const rrlHeaders = retryResponse.headers;
+            if (rrlHeaders) {
+              lastRateLimitHeaders ??= {};
+              rrlHeaders.forEach((val, key) => {
+                const lk = key.toLowerCase();
+                if (lk.startsWith("x-ratelimit-") || lk === "retry-after-ms" || lk === "retry-after") {
+                  lastRateLimitHeaders![lk] = val;
+                }
+              });
+            }
             const retryBody = await retryResponse.clone().text().catch(() => undefined);
-            manager.markRateLimited(next, parseRetryAfter(retryResponse, retryBody), model);
+            let retryCooldown = parseRetryAfter(retryResponse, retryBody);
+            if (retryCooldown === 60_000 && retryBody) {
+              try {
+                const body = JSON.parse(retryBody);
+                const errType = body?.error?.code ?? body?.error?.type ?? "";
+                if (errType === "insufficient_quota" || errType === "usage_limit_reached") {
+                  retryCooldown = 3_600_000;
+                }
+              } catch {}
+            }
+            manager.markRateLimited(next, retryCooldown, model);
+            manager.releasePending(next.index);
+            excluded.add(next.index);
+            next = await manager.selectExcluding(excluded, model, false);
+            continue;
           }
+
+          manager.releasePending(next.index);
+          return retryResponse;
         }
 
         // All accounts exhausted
@@ -601,24 +688,30 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (debug) console.log("[multi-auth] 401, forcing token refresh");
         const refreshed = await manager.ensureValidToken(account);
         if (refreshed) {
-          const retryResponse = await fetch(requestUrl, withAccount(account));
+          const retryResponse = await originalFetch(requestUrl, withAccount(account));
           if (isChatEndpoint && retryResponse.ok) {
+            manager.releasePending(account.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
+          manager.releasePending(account.index);
           return retryResponse;
         }
 
         // Try next account
         const next = await manager.selectExcluding(new Set([account.index]), model);
         if (next) {
+          manager.releasePending(account.index);
           await manager.ensureValidToken(next);
-          const retryResponse = await fetch(requestUrl, withAccount(next));
+          const retryResponse = await originalFetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
+            manager.releasePending(next.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
+          manager.releasePending(next.index);
           return retryResponse;
         }
 
+        manager.releasePending(account.index);
         return response;
       }
 
@@ -628,14 +721,17 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${account.index + 1}`;
-            const to = next.label || next.email || `Acct ${next.index + 1}`;
+            const to = next.label || next.email || `Acct ${next.index + 1}`
             showToast(client, `[multi-auth] Model issue on ${from}, trying ${to}`, "info");
           }
+          manager.releasePending(account.index);
           await manager.ensureValidToken(next);
-          const retryResponse = await fetch(requestUrl, withAccount(next));
+          const retryResponse = await originalFetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
+            manager.releasePending(next.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
+          manager.releasePending(next.index);
           return retryResponse;
         }
       }
@@ -644,9 +740,11 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       if (isChatEndpoint && response.ok) {
         const quota = extractQuotaFromHeaders(response.headers);
         if (quota) manager.updateQuota(account, quota, model);
+        manager.releasePending(account.index);
         return wrapSSEAsChatCompletion(response, model);
       }
 
+      manager.releasePending(account.index);
       return response;
     }
 
