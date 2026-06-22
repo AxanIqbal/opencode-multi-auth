@@ -98,16 +98,18 @@ Environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `OPENCODE_MULTI_AUTH_STRATEGY` | `sticky` | Account selection: `sticky` or `round-robin` |
+| `OPENCODE_MULTI_AUTH_STRATEGY` | `quota-aware` | Account selection: `quota-aware`, `sticky`, or `round-robin` |
 | `OPENCODE_MULTI_AUTH_DEBUG` | `0` | Enable debug logging |
 | `OPENCODE_MULTI_AUTH_QUIET` | `0` | Suppress toast notifications |
 | `OPENCODE_MULTI_AUTH_PER_MODEL` | `1` | Track rate limits per model (`0` = global) |
 | `OPENCODE_MULTI_AUTH_COOLDOWN_MS` | `60000` | Cooldown duration after rate limit (ms) |
 | `OPENCODE_MULTI_AUTH_PID_OFFSET` | `0` | Offset account selection by PID for parallel processes |
+| `OPENCODE_MULTI_AUTH_QUOTA_CRITICAL_PERCENT` | `95` | Treat an account as exhausted when reported usage reaches this percentage until reset |
 
 ### Selection strategies
 
-- **sticky** (default): First successful account is reused for the session. Falls back on rate limit.
+- **quota-aware** (default): Prefers the account with the most remaining reported Codex quota. Accounts without quota history fall back to least-recently-used until usage data is observed.
+- **sticky**: First successful account is reused for the session. Falls back on rate limit.
 - **round-robin**: Cycles through accounts evenly. Useful for parallel processes sharing the same account file.
 
 ## Account rotation behavior
