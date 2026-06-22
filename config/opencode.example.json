@@ -1,0 +1,12 @@
+{
+  "plugin": ["opencode-multi-auth"],
+  "experimental": {
+    "primary_tools": ["multi-auth-list"]
+  },
+  "command": {
+    "multi-auth-list": {
+      "template": "Run the multi-auth-list tool and output the result EXACTLY as returned, without any additional text.",
+      "description": "List all configured OpenAI accounts and their status."
+    }
+  }
+}

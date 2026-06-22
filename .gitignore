@@ -1,0 +1,10 @@
+node_modules/
+
+.env
+.env.*
+*.log
+
+openai-accounts.json
+auth.json
+
+.DS_Store
