@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { tool, type Plugin, type PluginInput, type AuthOuathResult } from "@opencode-ai/plugin";
 import type { Auth } from "@opencode-ai/sdk";
 import { AccountManager } from "./accounts/manager.js";
-import type { ManagedAccount, PluginConfig } from "./accounts/types.js";
+import type { ManagedAccount, PluginConfig, QuotaSnapshot, QuotaWindow } from "./accounts/types.js";
 import { resolveConfig } from "./accounts/types.js";
 import {
   decodeJWT,
@@ -84,6 +84,83 @@ function parseSSE(body: string): SSEData[] {
   }
 
   return events;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function numberValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function epochMs(value: unknown): number | undefined {
+  const numeric = numberValue(value);
+  if (numeric !== undefined) return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  if (typeof value === "string") {
+    const parsed = new Date(value).getTime();
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function quotaWindow(value: unknown): QuotaWindow | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const usedPercent = numberValue(record.used_percent ?? record.usedPercent);
+  const windowMinutes = numberValue(record.window_minutes ?? record.windowMinutes);
+  const resetsAt = epochMs(record.resets_at ?? record.resetsAt);
+  if (usedPercent === undefined && windowMinutes === undefined && resetsAt === undefined) return undefined;
+  return { usedPercent, windowMinutes, resetsAt };
+}
+
+function findRateLimits(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (depth > 4) return undefined;
+  const record = asRecord(value);
+  if (!record) return undefined;
+
+  const direct = asRecord(record.rate_limits ?? record.rateLimits);
+  if (direct) return direct;
+
+  if (quotaWindow(record.primary) || quotaWindow(record.secondary)) return record;
+
+  for (const nested of Object.values(record)) {
+    const found = findRateLimits(nested, depth + 1);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function quotaSnapshotFromEvents(events: SSEData[]): QuotaSnapshot | undefined {
+  for (const evt of events) {
+    try {
+      const parsed = JSON.parse(evt.data) as unknown;
+      const limits = findRateLimits(parsed);
+      if (!limits) continue;
+
+      const primary = quotaWindow(limits.primary);
+      const secondary = quotaWindow(limits.secondary);
+      if (!primary && !secondary) continue;
+
+      const planType = typeof limits.plan_type === "string" ? limits.plan_type
+        : typeof limits.planType === "string" ? limits.planType
+          : undefined;
+      const rateLimitReachedType = typeof limits.rate_limit_reached_type === "string"
+        ? limits.rate_limit_reached_type
+        : typeof limits.rateLimitReachedType === "string"
+          ? limits.rateLimitReachedType
+          : undefined;
+
+      return { primary, secondary, planType, rateLimitReachedType, updatedAt: Date.now() };
+    } catch {}
+  }
+  return undefined;
 }
 
 function buildChatCompletionFromSSE(
@@ -172,9 +249,15 @@ function toResponsesBody(chatBody: Record<string, unknown>): Record<string, unkn
   return body;
 }
 
-async function wrapSSEAsChatCompletion(sseResponse: Response, model: string | undefined): Promise<Response> {
+async function wrapSSEAsChatCompletion(
+  sseResponse: Response,
+  model: string | undefined,
+  onQuota?: (snapshot: QuotaSnapshot) => void,
+): Promise<Response> {
   const sseText = await sseResponse.text();
   const events = parseSSE(sseText);
+  const quota = quotaSnapshotFromEvents(events);
+  if (quota) onQuota?.(quota);
   const completion = buildChatCompletionFromSSE(events, model || "");
   return new Response(JSON.stringify(completion), {
     status: 200,
@@ -208,6 +291,7 @@ function envConfig(): Partial<PluginConfig> {
   const strategy = process.env.OPENCODE_MULTI_AUTH_STRATEGY as
     | "sticky"
     | "round-robin"
+    | "quota-aware"
     | undefined;
   return {
     accountSelectionStrategy: strategy,
@@ -219,6 +303,10 @@ function envConfig(): Partial<PluginConfig> {
       process.env.OPENCODE_MULTI_AUTH_COOLDOWN_MS ?? "",
       10,
     ) || 60_000,
+    quotaCriticalThresholdPercent: parseInt(
+      process.env.OPENCODE_MULTI_AUTH_QUOTA_CRITICAL_PERCENT ?? "",
+      10,
+    ) || 95,
   };
 }
 
@@ -243,6 +331,34 @@ function extractSessionKey(body: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function formatReset(resetsAt: number | undefined, now: number): string | undefined {
+  if (!resetsAt) return undefined;
+  const minutes = Math.max(0, Math.ceil((resetsAt - now) / 60000));
+  if (minutes <= 0) return "reset now";
+  if (minutes < 60) return `resets in ${minutes}m`;
+  const hours = Math.ceil(minutes / 60);
+  return `resets in ${hours}h`;
+}
+
+function formatQuota(quota: QuotaSnapshot | undefined, now: number): string {
+  if (!quota) return "";
+
+  const parts: string[] = [];
+  const primaryUsed = quota.primary?.usedPercent;
+  if (typeof primaryUsed === "number") {
+    const reset = formatReset(quota.primary?.resetsAt, now);
+    parts.push(`5h ${Math.max(0, Math.round(100 - primaryUsed))}% left${reset ? `, ${reset}` : ""}`);
+  }
+
+  const secondaryUsed = quota.secondary?.usedPercent;
+  if (typeof secondaryUsed === "number") {
+    const reset = formatReset(quota.secondary?.resetsAt, now);
+    parts.push(`weekly ${Math.max(0, Math.round(100 - secondaryUsed))}% left${reset ? `, ${reset}` : ""}`);
+  }
+
+  return parts.length > 0 ? ` (${parts.join("; ")})` : "";
 }
 
 function buildAuthHeaders(
@@ -482,7 +598,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
           // Post-process SSE if it succeeded and this is chat
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model);
+            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
+              manager.updateQuota(next, quota, model);
+            });
           }
           return retryResponse;
         }
@@ -501,7 +619,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (refreshed) {
           const retryResponse = await fetch(requestUrl, withAccount(account));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model);
+            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
+              manager.updateQuota(account, quota, model);
+            });
           }
           return retryResponse;
         }
@@ -512,7 +632,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           const retryResponse = await fetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model);
+            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
+              manager.updateQuota(next, quota, model);
+            });
           }
           return retryResponse;
         }
@@ -532,7 +654,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           const retryResponse = await fetch(requestUrl, withAccount(next));
           if (isChatEndpoint && retryResponse.ok) {
-            return wrapSSEAsChatCompletion(retryResponse, model);
+            return wrapSSEAsChatCompletion(retryResponse, model, (quota) => {
+              manager.updateQuota(next, quota, model);
+            });
           }
           return retryResponse;
         }
@@ -540,7 +664,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
       // ── Post-process SSE for successful chat completions ──
       if (isChatEndpoint && response.ok) {
-        return wrapSSEAsChatCompletion(response, model);
+        return wrapSSEAsChatCompletion(response, model, (quota) => {
+          manager.updateQuota(account, quota, model);
+        });
       }
 
       return response;
@@ -756,7 +882,8 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             const limited = acct.globalRateLimitReset && acct.globalRateLimitReset > now
               ? ` (rate-limited until ${new Date(acct.globalRateLimitReset).toLocaleTimeString()})`
               : "";
-            lines.push(`  ${status} ${label}${plan}${limited}`);
+            const quota = formatQuota(acct.quota, now);
+            lines.push(`  ${status} ${label}${plan}${quota}${limited}`);
           }
 
           return lines.join("\n");
