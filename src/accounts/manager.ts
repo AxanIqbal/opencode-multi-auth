@@ -1,6 +1,6 @@
 import { refreshAccessToken, extractTokenInfo } from "../auth/tokens.js";
 import { ACCOUNTS_FILE, OPENCODE_AUTH_FILE, readJSON, writeJSON } from "../lib/storage.js";
-import type { ManagedAccount, AccountsStore, PluginConfig } from "./types.js";
+import type { ManagedAccount, AccountsStore, PluginConfig, QuotaSnapshot } from "./types.js";
 import { resolveConfig } from "./types.js";
 
 /**
@@ -162,6 +162,15 @@ export class AccountManager {
     if (this.accounts.length === 0) return null;
     this.initStrategy();
 
+    if (this.config.accountSelectionStrategy === "quota-aware") {
+      const selected = this.pickQuotaAware(model, Date.now(), new Set());
+      if (selected) {
+        this.activeIndex = selected.index;
+        selected.lastUsed = Date.now();
+        return selected;
+      }
+    }
+
     const useRR = this.config.accountSelectionStrategy === "round-robin";
     const startIdx = useRR ? this.roundRobinCursor : this.activeIndex;
     const now = Date.now();
@@ -200,6 +209,15 @@ export class AccountManager {
     if (this.accounts.length === 0) return null;
     const now = Date.now();
 
+    if (this.config.accountSelectionStrategy === "quota-aware") {
+      const selected = this.pickQuotaAware(model, now, exclude);
+      if (selected) {
+        this.activeIndex = selected.index;
+        selected.lastUsed = now;
+        return selected;
+      }
+    }
+
     for (const acct of this.accounts) {
       if (exclude.has(acct.index)) continue;
       if (this.isAvailable(acct, model, now)) {
@@ -226,6 +244,16 @@ export class AccountManager {
       const id = account.label || account.email || `acc-${account.index}`;
       console.log(`[multi-auth] ${id} rate-limited until ${new Date(resetTime).toISOString()}`);
     }
+  }
+
+  updateQuota(account: ManagedAccount, snapshot: QuotaSnapshot, model?: string): void {
+    account.quota = snapshot;
+    if (model && this.config.perModelRateLimits) {
+      account.quotaByModel = account.quotaByModel ?? {};
+      account.quotaByModel[model] = snapshot;
+    }
+    if (snapshot.planType) account.planType = snapshot.planType;
+    this.save();
   }
 
   /** Mark token refresh failure and increment backoff. */
@@ -335,7 +363,60 @@ export class AccountManager {
       const modelReset = account.rateLimitResets[model];
       if (modelReset && modelReset > now) return false;
     }
+    const quota = this.quotaFor(account, model);
+    if (this.isQuotaCritical(quota?.primary, now)) return false;
+    if (this.isQuotaCritical(quota?.secondary, now)) return false;
     return true;
+  }
+
+  private pickQuotaAware(
+    model: string | undefined,
+    now: number,
+    exclude: Set<number>,
+  ): ManagedAccount | null {
+    let best: ManagedAccount | null = null;
+    let bestScore = -Infinity;
+
+    for (const acct of this.accounts) {
+      if (exclude.has(acct.index)) continue;
+      if (!this.isAvailable(acct, model, now)) continue;
+
+      const score = this.quotaScore(acct, model, now);
+      if (score > bestScore) {
+        bestScore = score;
+        best = acct;
+      }
+    }
+
+    return best;
+  }
+
+  private quotaFor(account: ManagedAccount, model: string | undefined): QuotaSnapshot | undefined {
+    if (model && this.config.perModelRateLimits) {
+      return account.quotaByModel?.[model] ?? account.quota;
+    }
+    return account.quota;
+  }
+
+  private isQuotaCritical(
+    window: QuotaSnapshot["primary"],
+    now: number,
+  ): boolean {
+    if (!window?.usedPercent || window.usedPercent < this.config.quotaCriticalThresholdPercent) {
+      return false;
+    }
+    return !window.resetsAt || window.resetsAt > now;
+  }
+
+  private quotaScore(account: ManagedAccount, model: string | undefined, now: number): number {
+    const quota = this.quotaFor(account, model);
+    const remaining = [quota?.primary, quota?.secondary]
+      .map((window) => typeof window?.usedPercent === "number" ? 100 - window.usedPercent : undefined)
+      .filter((value): value is number => typeof value === "number");
+
+    const quotaScore = remaining.length > 0 ? Math.min(...remaining) : 50;
+    const lastUsedAgeSeconds = account.lastUsed ? Math.min((now - account.lastUsed) / 1000, 3600) : 3600;
+    return quotaScore * 10_000 + lastUsedAgeSeconds;
   }
 
   private pickBestFallback(
