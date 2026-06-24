@@ -223,7 +223,6 @@ export class AccountManager {
         if (selected) {
           this.activeIndex = selected.index;
           selected.lastUsed = Date.now();
-          this.pendingAccounts.add(selected.index);
           return selected;
         }
       }
@@ -241,7 +240,6 @@ export class AccountManager {
             this.roundRobinCursor = (idx + 1) % this.accounts.length;
           }
           acct.lastUsed = now;
-          this.pendingAccounts.add(acct.index);
           return acct;
         }
       }

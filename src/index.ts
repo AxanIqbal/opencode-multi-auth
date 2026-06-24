@@ -562,7 +562,21 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         return { ...init, headers: h };
       }
 
-      let response = await originalFetch(requestUrl, requestInit);
+      let response: Response;
+      try {
+        response = await originalFetch(requestUrl, requestInit);
+      } catch (err) {
+        manager.releasePending(account.index);
+        if (debug) {
+          console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return new Response(
+          JSON.stringify({
+            error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
+          }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        );
+      }
 
       // ── Handle rate limits ────────────────────────
       if (isRateLimit(response.status)) {
@@ -629,7 +643,18 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             console.log(`[multi-auth] Retrying on ${next.label || next.email || `acc-${next.index}`}`);
           }
 
-          const retryResponse = await originalFetch(requestUrl, withAccount(next));
+          let retryResponse: Response;
+          try {
+            retryResponse = await originalFetch(requestUrl, withAccount(next));
+          } catch (err) {
+            manager.releasePending(next.index);
+            if (debug) {
+              console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            excluded.add(next.index);
+            next = await manager.selectExcluding(excluded, model, false);
+            continue;
+          }
 
           if (isChatEndpoint && retryResponse.ok) {
             manager.releasePending(next.index);
@@ -688,7 +713,46 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (debug) console.log("[multi-auth] 401, forcing token refresh");
         const refreshed = await manager.ensureValidToken(account);
         if (refreshed) {
-          const retryResponse = await originalFetch(requestUrl, withAccount(account));
+          let retryResponse: Response;
+          try {
+            retryResponse = await originalFetch(requestUrl, withAccount(account));
+          } catch (err) {
+            manager.releasePending(account.index);
+            if (debug) {
+              console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            const next = await manager.selectExcluding(new Set([account.index]), model);
+            if (next) {
+              await manager.ensureValidToken(next);
+              let retryResponse2: Response;
+              try {
+                retryResponse2 = await originalFetch(requestUrl, withAccount(next));
+              } catch (err2) {
+                manager.releasePending(next.index);
+                if (debug) {
+                  console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err2 instanceof Error ? err2.message : String(err2)}`);
+                }
+                return new Response(
+                  JSON.stringify({
+                    error: `Network error: ${err2 instanceof Error ? err2.message : String(err2)}`,
+                  }),
+                  { status: 502, headers: { "Content-Type": "application/json" } },
+                );
+              }
+              if (isChatEndpoint && retryResponse2.ok) {
+                manager.releasePending(next.index);
+                return wrapSSEAsChatCompletion(retryResponse2, model);
+              }
+              manager.releasePending(next.index);
+              return retryResponse2;
+            }
+            return new Response(
+              JSON.stringify({
+                error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
+              }),
+              { status: 502, headers: { "Content-Type": "application/json" } },
+            );
+          }
           if (isChatEndpoint && retryResponse.ok) {
             manager.releasePending(account.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
@@ -702,7 +766,21 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (next) {
           manager.releasePending(account.index);
           await manager.ensureValidToken(next);
-          const retryResponse = await originalFetch(requestUrl, withAccount(next));
+          let retryResponse: Response;
+          try {
+            retryResponse = await originalFetch(requestUrl, withAccount(next));
+          } catch (err) {
+            manager.releasePending(next.index);
+            if (debug) {
+              console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            return new Response(
+              JSON.stringify({
+                error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
+              }),
+              { status: 502, headers: { "Content-Type": "application/json" } },
+            );
+          }
           if (isChatEndpoint && retryResponse.ok) {
             manager.releasePending(next.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
@@ -726,7 +804,21 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           }
           manager.releasePending(account.index);
           await manager.ensureValidToken(next);
-          const retryResponse = await originalFetch(requestUrl, withAccount(next));
+          let retryResponse: Response;
+          try {
+            retryResponse = await originalFetch(requestUrl, withAccount(next));
+          } catch (err) {
+            manager.releasePending(next.index);
+            if (debug) {
+              console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            return new Response(
+              JSON.stringify({
+                error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
+              }),
+              { status: 502, headers: { "Content-Type": "application/json" } },
+            );
+          }
           if (isChatEndpoint && retryResponse.ok) {
             manager.releasePending(next.index);
             return wrapSSEAsChatCompletion(retryResponse, model);
