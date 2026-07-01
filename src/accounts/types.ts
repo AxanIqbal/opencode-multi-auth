@@ -78,21 +78,24 @@ export interface PluginConfig {
   removeOnInvalidGrant: boolean;
   /** Track rate limits per model (true) or globally (false) */
   perModelRateLimits: boolean;
-  /** Cooldown in ms after a rate-limit (default: 60s) */
-  rateLimitCooldownMs: number;
-  quotaCriticalThresholdPercent: number;
+   /** Cooldown in ms after a rate-limit (default: 60s) */
+   rateLimitCooldownMs: number;
+   /** Fetch timeout in ms (default: 300s = 5 minutes) */
+   fetchTimeoutMs: number;
+   quotaCriticalThresholdPercent: number;
 }
 
 export const DEFAULT_CONFIG: PluginConfig = {
-  accountSelectionStrategy: "quota-aware",
-  debug: false,
-  quietMode: false,
-  pidOffsetEnabled: false,
-  proactiveRefreshThresholdMs: 5 * 60 * 1000,   // 5 min
-  removeOnInvalidGrant: true,
-  perModelRateLimits: true,
-  rateLimitCooldownMs: 60_000,
-  quotaCriticalThresholdPercent: 95,
+   accountSelectionStrategy: "quota-aware",
+   debug: false,
+   quietMode: false,
+   pidOffsetEnabled: false,
+   proactiveRefreshThresholdMs: 5 * 60 * 1000,
+   removeOnInvalidGrant: true,
+   perModelRateLimits: true,
+   rateLimitCooldownMs: 60_000,
+   fetchTimeoutMs: 300_000,
+   quotaCriticalThresholdPercent: 95,
 };
 
 /** Merge partial config with defaults */

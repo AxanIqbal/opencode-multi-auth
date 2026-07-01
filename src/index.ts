@@ -263,26 +263,30 @@ function traceparent(): string {
 // ── Plugin config from environment ─────────────────────────
 
 function envConfig(): Partial<PluginConfig> {
-  const strategy = process.env.OPENCODE_MULTI_AUTH_STRATEGY as
-    | "sticky"
-    | "round-robin"
-    | "quota-aware"
-    | undefined;
-  return {
-    accountSelectionStrategy: strategy,
-    debug: process.env.OPENCODE_MULTI_AUTH_DEBUG === "1",
-    quietMode: process.env.OPENCODE_MULTI_AUTH_QUIET === "1",
-    pidOffsetEnabled: process.env.OPENCODE_MULTI_AUTH_PID_OFFSET === "1",
-    perModelRateLimits: process.env.OPENCODE_MULTI_AUTH_PER_MODEL !== "0",
-    rateLimitCooldownMs: parseInt(
-      process.env.OPENCODE_MULTI_AUTH_COOLDOWN_MS ?? "",
-      10,
-    ) || 60_000,
-    quotaCriticalThresholdPercent: parseInt(
-      process.env.OPENCODE_MULTI_AUTH_QUOTA_CRITICAL_PERCENT ?? "",
-      10,
-    ) || 95,
-  };
+   const strategy = process.env.OPENCODE_MULTI_AUTH_STRATEGY as
+     | "sticky"
+     | "round-robin"
+     | "quota-aware"
+     | undefined;
+   return {
+     accountSelectionStrategy: strategy,
+     debug: process.env.OPENCODE_MULTI_AUTH_DEBUG === "1",
+     quietMode: process.env.OPENCODE_MULTI_AUTH_QUIET === "1",
+     pidOffsetEnabled: process.env.OPENCODE_MULTI_AUTH_PID_OFFSET === "1",
+     perModelRateLimits: process.env.OPENCODE_MULTI_AUTH_PER_MODEL !== "0",
+     rateLimitCooldownMs: parseInt(
+       process.env.OPENCODE_MULTI_AUTH_COOLDOWN_MS ?? "",
+       10,
+     ) || 60_000,
+     fetchTimeoutMs: parseInt(
+       process.env.OPENCODE_MULTI_AUTH_FETCH_TIMEOUT_MS ?? "",
+       10,
+     ) || 300_000,
+     quotaCriticalThresholdPercent: parseInt(
+       process.env.OPENCODE_MULTI_AUTH_QUOTA_CRITICAL_PERCENT ?? "",
+       10,
+     ) || 95,
+   };
 }
 
 // ── Helpers ────────────────────────────────────────────────
@@ -390,14 +394,34 @@ async function showToast(
 // ── Plugin factory ─────────────────────────────────────────
 
 export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
-  const cfg = resolveConfig(envConfig());
-  const debug = cfg.debug;
+   const cfg = resolveConfig(envConfig());
+   const debug = cfg.debug;
 
-  const manager = new AccountManager(cfg);
-  manager.load();
-  manager.importFromOpenCodeAuth();
+   const manager = new AccountManager(cfg);
+   manager.load();
+   manager.importFromOpenCodeAuth();
 
-  // ── Loader: intercept fetch requests ──────────────────
+   // ── Timeout wrapper ──────────────────────────────────
+   async function fetchWithTimeout(
+     url: string | URL | Request,
+     init?: RequestInit,
+     timeoutMs: number = cfg.fetchTimeoutMs,
+   ): Promise<Response> {
+     const controller = new AbortController();
+     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+     try {
+       return await globalThis.fetch(url, { ...init, signal: controller.signal });
+     } catch (err) {
+       if (err instanceof Error && err.name === "AbortError") {
+         throw new Error("The operation timed out.");
+       }
+       throw err;
+     } finally {
+       clearTimeout(timeoutId);
+     }
+   }
+
+   // ── Loader: intercept fetch requests ──────────────────
 
   async function loader(
     _getAuth: () => Promise<Auth>,
@@ -562,21 +586,21 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         return { ...init, headers: h };
       }
 
-      let response: Response;
-      try {
-        response = await originalFetch(requestUrl, requestInit);
-      } catch (err) {
-        manager.releasePending(account.index);
-        if (debug) {
-          console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        return new Response(
-          JSON.stringify({
-            error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
-          }),
-          { status: 502, headers: { "Content-Type": "application/json" } },
-        );
-      }
+       let response: Response;
+       try {
+         response = await fetchWithTimeout(requestUrl, requestInit);
+       } catch (err) {
+         manager.releasePending(account.index);
+         if (debug) {
+           console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
+         }
+         return new Response(
+           JSON.stringify({
+             error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
+           }),
+           { status: 502, headers: { "Content-Type": "application/json" } },
+         );
+       }
 
       // ── Handle rate limits ────────────────────────
       if (isRateLimit(response.status)) {
@@ -645,7 +669,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
 
           let retryResponse: Response;
           try {
-            retryResponse = await originalFetch(requestUrl, withAccount(next));
+             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
             manager.releasePending(next.index);
             if (debug) {
@@ -713,10 +737,10 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         if (debug) console.log("[multi-auth] 401, forcing token refresh");
         const refreshed = await manager.ensureValidToken(account);
         if (refreshed) {
-          let retryResponse: Response;
-          try {
-            retryResponse = await originalFetch(requestUrl, withAccount(account));
-          } catch (err) {
+           let retryResponse: Response;
+           try {
+             retryResponse = await fetchWithTimeout(requestUrl, withAccount(account));
+           } catch (err) {
             manager.releasePending(account.index);
             if (debug) {
               console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
@@ -726,7 +750,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
               await manager.ensureValidToken(next);
               let retryResponse2: Response;
               try {
-                retryResponse2 = await originalFetch(requestUrl, withAccount(next));
+                 retryResponse2 = await fetchWithTimeout(requestUrl, withAccount(next));
               } catch (err2) {
                 manager.releasePending(next.index);
                 if (debug) {
@@ -768,7 +792,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           let retryResponse: Response;
           try {
-            retryResponse = await originalFetch(requestUrl, withAccount(next));
+             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
             manager.releasePending(next.index);
             if (debug) {
@@ -806,7 +830,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           await manager.ensureValidToken(next);
           let retryResponse: Response;
           try {
-            retryResponse = await originalFetch(requestUrl, withAccount(next));
+             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
             manager.releasePending(next.index);
             if (debug) {
