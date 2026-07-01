@@ -48,6 +48,7 @@ import {
 const PROVIDER_ID = "openai";
 
 const RESPONSES_ENDPOINT = `${CODEX_BASE_URL}/responses`;
+const TOKEN_MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
 const REASONING_VARIANTS = ["low", "medium", "high", "xhigh"] as const;
 const REASONING_VARIANT_CONFIG = Object.fromEntries(
   REASONING_VARIANTS.map((effort) => [effort, { reasoningEffort: effort }]),
@@ -397,11 +398,16 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
    const cfg = resolveConfig(envConfig());
    const debug = cfg.debug;
 
-   const manager = new AccountManager(cfg);
-   manager.load();
-   manager.importFromOpenCodeAuth();
+    const manager = new AccountManager(cfg);
+    manager.load();
+    manager.importFromOpenCodeAuth();
+   void manager.refreshExpiringTokens();
+   const tokenMaintenanceTimer = setInterval(() => {
+     void manager.refreshExpiringTokens();
+   }, TOKEN_MAINTENANCE_INTERVAL_MS);
+   tokenMaintenanceTimer.unref?.();
 
-   // ── Timeout wrapper ──────────────────────────────────
+    // ── Timeout wrapper ──────────────────────────────────
    async function fetchWithTimeout(
      url: string | URL | Request,
      init?: RequestInit,

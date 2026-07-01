@@ -56,16 +56,18 @@ export class AccountManager {
         ? diskStore.accounts.map((a) => ({ ...a }))
         : [];
 
-    const matchKey = (a: ManagedAccount): string =>
-      a.userId && a.accountId ? `${a.userId}/${a.accountId}` : a.refresh;
+    const matches = (a: ManagedAccount, b: ManagedAccount): boolean => {
+      if (a.userId && a.accountId && b.userId && b.accountId) {
+        return a.userId === b.userId && a.accountId === b.accountId;
+      }
+      return a.refresh === b.refresh || a.index === b.index;
+    };
 
-    const diskIndex = new Map<string, ManagedAccount>();
-    for (const d of diskAccounts) diskIndex.set(matchKey(d), d);
-
+    const matchedDiskAccounts = new Set<ManagedAccount>();
     for (const mem of this.accounts) {
-      const key = matchKey(mem);
-      const existing = diskIndex.get(key);
+      const existing = diskAccounts.find((disk) => !matchedDiskAccounts.has(disk) && matches(mem, disk));
       if (existing) {
+        matchedDiskAccounts.add(existing);
         const mergedResets = { ...existing.rateLimitResets, ...mem.rateLimitResets };
         Object.assign(existing, mem, { rateLimitResets: mergedResets });
       } else {
@@ -344,6 +346,13 @@ export class AccountManager {
     account.isRefreshing = true;
     account.refreshPromise = this._doRefresh(account);
     return account.refreshPromise;
+  }
+
+  async refreshExpiringTokens(): Promise<void> {
+    for (const account of this.accounts) {
+      if (account.consecutiveFailures >= 3) continue;
+      await this.ensureValidToken(account);
+    }
   }
 
   private async _doRefresh(account: ManagedAccount): Promise<boolean> {

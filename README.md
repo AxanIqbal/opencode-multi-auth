@@ -82,6 +82,8 @@ opencode run -m openai/gpt-5.4-mini "list accounts"
 
 Shows each account's status: `[ACTIVE]`, `[READY]`, `[DISABLED]` (after 3+ consecutive failures), and any active rate-limit cooldowns.
 
+Rate-limited accounts are still checked for OAuth token refresh on plugin startup and every 30 minutes while the plugin process is running, so a long `resets_at` cooldown does not prevent token maintenance.
+
 ## Adding accounts
 
 ### Paste tokens
