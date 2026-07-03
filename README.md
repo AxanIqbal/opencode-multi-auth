@@ -82,6 +82,14 @@ opencode run -m openai/gpt-5.4-mini "list accounts"
 
 Shows each account's status: `[ACTIVE]`, `[READY]`, `[DISABLED]` (after 3+ consecutive failures), and any active rate-limit cooldowns.
 
+Set an account as a fallback by giving it a larger priority number:
+
+```
+opencode run -m openai/gpt-5.4-mini "set account 2 priority 10"
+```
+
+Priorities are tiers: lower numbers are selected first, and the default is `0`. An account with priority `10` is only used when no priority `0` account is available for that model. Within the same priority tier, the configured selection strategy still applies.
+
 Rate-limited accounts are still checked for OAuth token refresh on plugin startup and every 30 minutes while the plugin process is running, so a long `resets_at` cooldown does not prevent token maintenance.
 
 ## Adding accounts
@@ -113,6 +121,8 @@ Environment variables:
 - **quota-aware** (default): Prefers the account with the most remaining reported Codex quota. Accounts without quota history fall back to least-recently-used until usage data is observed.
 - **sticky**: First successful account is reused for the session. Falls back on rate limit.
 - **round-robin**: Cycles through accounts evenly. Useful for parallel processes sharing the same account file.
+
+All strategies honor account priority first. Use `multi-auth-set-priority` or ask OpenCode to "set account N priority M"; lower numbers are preferred.
 
 ## Account rotation behavior
 

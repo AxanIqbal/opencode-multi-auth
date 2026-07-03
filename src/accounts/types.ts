@@ -32,6 +32,7 @@ export interface ManagedAccount {
   addedAt: number;
   /** Last time this account was used */
   lastUsed?: number;
+  priority?: number;
   /** OAuth refresh token — used to get new access tokens */
   refresh: string;
   /** Current access token (may be expired, refreshed on use) */

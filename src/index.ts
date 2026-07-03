@@ -1074,6 +1074,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             const isActive = active && acct.index === active.index;
             const label = acct.label || acct.email || `Account ${acct.index + 1}`;
             const plan = acct.planType ? ` [${acct.planType}]` : "";
+            const priority = ` priority=${acct.priority ?? 0}`;
             const status = acct.consecutiveFailures >= 3 ? "[DISABLED]"
               : isActive ? "[ACTIVE]"
               : "[READY]";
@@ -1081,10 +1082,25 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
               ? ` (rate-limited until ${new Date(acct.globalRateLimitReset).toLocaleTimeString()})`
               : "";
             const quota = formatQuota(acct.quota, now);
-            lines.push(`  ${status} ${label}${plan}${quota}${limited}`);
+            lines.push(`  ${status} #${acct.index + 1} ${label}${plan}${priority}${quota}${limited}`);
           }
 
           return lines.join("\n");
+        },
+      }),
+      "multi-auth-set-priority": tool({
+        description: "Set an OpenAI account priority. Lower numbers are selected first; higher numbers are fallback accounts.",
+        args: {
+          account: tool.schema.number().int().min(1).describe("Displayed account number from multi-auth-list, starting at 1."),
+          priority: tool.schema.number().int().min(0).describe("Selection priority. 0 is preferred; larger numbers are fallback tiers."),
+        },
+        async execute(args) {
+          const account = manager.setPriority(args.account - 1, args.priority);
+          if (!account) {
+            return `No account #${args.account}. Run multi-auth-list to see available accounts.`;
+          }
+          const label = account.label || account.email || `Account ${account.index + 1}`;
+          return `Set #${account.index + 1} ${label} priority=${account.priority ?? 0}. Lower numbers are selected first.`;
         },
       }),
     },
@@ -1097,10 +1113,18 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           "Run the multi-auth-list tool and output the result EXACTLY as returned, without any additional text.",
         description: "List all configured OpenAI accounts and their status.",
       };
+      cfg.command["multi-auth-set-priority"] = {
+        template:
+          "Use the multi-auth-set-priority tool to set the requested account number and priority, then output the result EXACTLY as returned, without any additional text.",
+        description: "Set an OpenAI account priority. Lower numbers are selected first.",
+      };
       cfg.experimental = cfg.experimental || {};
       cfg.experimental.primary_tools = cfg.experimental.primary_tools || [];
       if (!cfg.experimental.primary_tools.includes("multi-auth-list")) {
         cfg.experimental.primary_tools.push("multi-auth-list");
+      }
+      if (!cfg.experimental.primary_tools.includes("multi-auth-set-priority")) {
+        cfg.experimental.primary_tools.push("multi-auth-set-priority");
       }
 
       // Register models exposed by the Codex backend for ChatGPT accounts.

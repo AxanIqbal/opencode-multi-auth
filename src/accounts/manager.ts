@@ -196,6 +196,15 @@ export class AccountManager {
     return true;
   }
 
+  setPriority(index: number, priority: number): ManagedAccount | null {
+    const account = this.accounts.find((a) => a.index === index);
+    if (!account) return null;
+    account.priority = priority;
+    this.strategyInitialized = false;
+    this.save();
+    return account;
+  }
+
   /** Get all accounts. */
   list(): ManagedAccount[] {
     return [...this.accounts];
@@ -232,10 +241,13 @@ export class AccountManager {
       const useRR = this.config.accountSelectionStrategy === "round-robin";
       const startIdx = useRR ? this.roundRobinCursor : this.activeIndex;
       const now = Date.now();
+      const priority = this.bestAvailablePriority(model, now, new Set());
+      if (priority === undefined) return null;
 
       for (let i = 0; i < this.accounts.length; i++) {
         const idx = (startIdx + i) % this.accounts.length;
         const acct = this.accounts[idx];
+        if (this.priorityOf(acct) !== priority) continue;
         if (this.isAvailable(acct, model, now)) {
           this.activeIndex = idx;
           if (useRR) {
@@ -270,8 +282,15 @@ export class AccountManager {
         }
       }
 
+      const priority = this.bestAvailablePriority(model, now, exclude);
+      if (priority === undefined) {
+        if (!allowFallback) return null;
+        return this.pickBestFallback(model, now, exclude);
+      }
+
       for (const acct of this.accounts) {
         if (exclude.has(acct.index)) continue;
+        if (this.priorityOf(acct) !== priority) continue;
         if (this.isAvailable(acct, model, now)) {
           this.activeIndex = acct.index;
           acct.lastUsed = now;
@@ -469,6 +488,29 @@ export class AccountManager {
     this.accounts.forEach((a, i) => (a.index = i));
   }
 
+  private priorityOf(account: ManagedAccount): number {
+    return typeof account.priority === "number" && Number.isFinite(account.priority)
+      ? account.priority
+      : 0;
+  }
+
+  private bestAvailablePriority(
+    model: string | undefined,
+    now: number,
+    exclude: Set<number>,
+  ): number | undefined {
+    let priority: number | undefined;
+    for (const acct of this.accounts) {
+      if (exclude.has(acct.index)) continue;
+      if (!this.isAvailable(acct, model, now)) continue;
+      const acctPriority = this.priorityOf(acct);
+      if (priority === undefined || acctPriority < priority) {
+        priority = acctPriority;
+      }
+    }
+    return priority;
+  }
+
   private isAvailable(account: ManagedAccount, model: string | undefined, now: number): boolean {
     if (account.consecutiveFailures >= 3) return false;
     if (this.pendingAccounts.has(account.index)) return false;
@@ -490,10 +532,13 @@ export class AccountManager {
   ): ManagedAccount | null {
     let best: ManagedAccount | null = null;
     let bestScore = -Infinity;
+    const priority = this.bestAvailablePriority(model, now, exclude);
+    if (priority === undefined) return null;
 
     for (const acct of this.accounts) {
       if (exclude.has(acct.index)) continue;
       if (!this.isAvailable(acct, model, now)) continue;
+      if (this.priorityOf(acct) !== priority) continue;
 
       const score = this.quotaScore(acct, model, now);
       if (score > bestScore) {
@@ -540,10 +585,12 @@ export class AccountManager {
   ): ManagedAccount | null {
     let best: ManagedAccount | null = null;
     let earliest = Infinity;
+    let bestPriority = Infinity;
 
     for (const acct of this.accounts) {
       if (exclude.has(acct.index)) continue;
       if (acct.consecutiveFailures >= 3) continue;
+      const priority = this.priorityOf(acct);
 
       let reset = acct.globalRateLimitReset || 0;
       if (model && this.config.perModelRateLimits) {
@@ -551,7 +598,8 @@ export class AccountManager {
         reset = Math.max(reset, mr);
       }
 
-      if (reset < earliest) {
+      if (priority < bestPriority || (priority === bestPriority && reset < earliest)) {
+        bestPriority = priority;
         earliest = reset;
         best = acct;
       }
