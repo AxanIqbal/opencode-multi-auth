@@ -39,6 +39,7 @@ opencode-multi-auth/
 | Model unsupported fallback | `src/index.ts:826` | 400 tries another account. |
 | OAuth/API-key UI flows | `src/index.ts:882` | Auto, manual code, paste-token, OpenAI API-key fallback, and Google API-key auth entries. |
 | Google API-key auth | `src/index.ts:1260` | Adds keys to the separate Google account store. |
+| Built-in Google auth import | `src/accounts/manager.ts:119` / `src/index.ts:1164` / `src/index.ts:579` / `src/index.ts:1303` | Imports current `auth.json` provider `google` API key into `google-accounts.json` on plugin dispose, before Gemini requests, or before account listing. |
 | Google account priority tool | `src/index.ts:1363` | `multi-auth-set-google-priority` updates Google fallback tiers. |
 | Browser launch | `src/index.ts:1310` | Uses `execFileSync`; keep shell-free. |
 | Account selection | `src/accounts/manager.ts:218` | `select`, `selectExcluding`, pending-account guard. |
@@ -74,6 +75,7 @@ opencode-multi-auth/
 - Google models are registered as `openai/gemini-*` / `openai/gemma-*` aliases because this single plugin loader is attached to provider `openai`; `google/*` requests are not intercepted by this plugin.
 - OAuth only for real accounts. `DUMMY_API_KEY` exists because OpenCode provider plumbing expects an API key.
 - Google AI Studio keys use `ManagedAccount.apiKey` and the separate `~/.config/opencode/google-accounts.json` store; do not mix them into OpenAI OAuth refresh flows.
+- Built-in OpenCode `google` provider auth is imported into the Google API-key pool on plugin dispose, account listing, or Gemini use, not during plugin startup; rotation still requires `openai/gemini-*` model syntax.
 - Config is env-only through `envConfig()` plus `DEFAULT_CONFIG`; vars use `OPENCODE_MULTI_AUTH_*`.
 - Rate limits are per-model by default. `OPENCODE_MULTI_AUTH_PER_MODEL=0` switches to global cooldowns.
 - Account file saves are immediate after cooldown, quota, add/remove, and token refresh changes; `save()` first merges disk state from other processes.

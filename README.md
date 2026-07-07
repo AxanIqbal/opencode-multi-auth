@@ -130,7 +130,7 @@ Opens `https://auth.openai.com/oauth/authorize` with the official OpenCode clien
 
 ### Google API keys
 
-Choose "Google API Key" in `opencode auth login` once per key. Requests to `openai/gemini-*` use those stored keys in priority/rotation order. OpenCode model names like `google/gemini-*` are not intercepted by this plugin because OpenCode currently attaches this loader to one provider ID; use the same model suffix with `openai/` to get rotation.
+Choose "Google API Key" under the plugin's `openai` provider in `opencode auth login` once per key for immediate multi-key rotation. If you log in to OpenCode's built-in `google` provider, OpenCode stores one current key in its own auth file; the plugin imports that current key after login shutdown, and also before `multi-auth-list` or `openai/gemini-*` use. Requests to `openai/gemini-*` use stored keys in priority/rotation order. OpenCode model names like `google/gemini-*` are not intercepted by this plugin because OpenCode currently attaches this loader to one provider ID; use the same model suffix with `openai/` to get rotation.
 
 ## Configuration
 
