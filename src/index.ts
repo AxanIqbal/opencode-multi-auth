@@ -165,7 +165,12 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
      }
     }
 
-    const googleLoader = createGoogleLoader({ cfg, googleManager, fetchWithTimeout });
+    const googleLoader = createGoogleLoader({
+      cfg,
+      googleManager,
+      fetchWithTimeout,
+      showToast: (message, variant) => showToast(client, message, variant),
+    });
     const openAILoader = createOpenAILoader({
       cfg,
       manager,
