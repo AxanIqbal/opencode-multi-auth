@@ -84,8 +84,13 @@ export function createGoogleLoader(options: {
         const message = googleManager.count() > 0
           ? `All Google API-key accounts are unavailable for ${model ?? "this request"}. Waiting for cooldown.`
           : "No Google API-key accounts configured. Run opencode auth login and choose Google API Key.";
+        if (cfg.debug) console.log(`[multi-auth] ${message}`);
         await notify(`[multi-auth] ${message}`, googleManager.count() > 0 ? "warning" : "error");
         return retryAfterResponse(message, model);
+      }
+
+      if (cfg.debug) {
+        console.log(`[multi-auth] → ${account.label || `Google ${account.index + 1}`} ${model ?? "google"} (google API)`);
       }
 
       if (!cfg.quietMode && googleManager.count() > 1) {
@@ -119,6 +124,9 @@ export function createGoogleLoader(options: {
         const body = await response.clone().text().catch(() => undefined);
         const cooldown = isRateLimit(response.status) ? parseRetryAfter(response, body) : cfg.rateLimitCooldownMs;
         googleManager.markRateLimited(account, cooldown, model);
+        if (cfg.debug) {
+          console.log(`[multi-auth] Google unavailable (${response.status}) on ${account.label || `Google ${account.index + 1}`}, cooldown ${cooldown}ms`);
+        }
         await notify(`[multi-auth] ${account.label || `Google ${account.index + 1}`} unavailable for ${model ?? "Google"}. Trying another key.`, "warning");
         const excluded = new Set<number>([account.index]);
         googleManager.releasePending(account);
@@ -126,6 +134,7 @@ export function createGoogleLoader(options: {
         let next = await googleManager.selectExcluding(excluded, model, false);
         while (next?.apiKey) {
           await notify(`[multi-auth] Switching ${account.label || `Google ${account.index + 1}`} → ${next.label || `Google ${next.index + 1}`}`, "info");
+          if (cfg.debug) console.log(`[multi-auth] Retrying Google on ${next.label || `Google ${next.index + 1}`}`);
           const nextPrepared = withGoogleApiKey(inputUrl, init, next.apiKey);
           let retryResponse: Response;
           try {
