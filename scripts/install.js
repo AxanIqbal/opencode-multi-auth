@@ -10,17 +10,47 @@
  * kicks off `opencode auth login` to register an account.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const PLUGIN_NAME = "opencode-multi-auth";
-const PLUGIN_ENTRIES = [
-  [PLUGIN_NAME, { provider: "openai" }],
-  [PLUGIN_NAME, { provider: "google" }],
-];
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const GOOGLE_PLUGIN_LINK = `${PACKAGE_ROOT}-google`;
+
+function ensureGooglePluginPath() {
+  if (existsSync(GOOGLE_PLUGIN_LINK)) {
+    const stat = lstatSync(GOOGLE_PLUGIN_LINK);
+    if (stat.isSymbolicLink()) {
+      if (realpathSync(GOOGLE_PLUGIN_LINK) === PACKAGE_ROOT) return GOOGLE_PLUGIN_LINK;
+      throw new Error(`${GOOGLE_PLUGIN_LINK} points outside ${PACKAGE_ROOT}.`);
+    }
+    if (stat.isDirectory()) {
+      const pkg = JSON.parse(readFileSync(join(GOOGLE_PLUGIN_LINK, "package.json"), "utf-8"));
+      if (pkg?.name === PLUGIN_NAME) return GOOGLE_PLUGIN_LINK;
+      throw new Error(`${GOOGLE_PLUGIN_LINK} is not an ${PLUGIN_NAME} checkout.`);
+    }
+    throw new Error(`${GOOGLE_PLUGIN_LINK} exists but is not a directory or symlink.`);
+  }
+  symlinkSync(PACKAGE_ROOT, GOOGLE_PLUGIN_LINK, "dir");
+  return GOOGLE_PLUGIN_LINK;
+}
+
+function pluginEntries() {
+  return [
+    [PACKAGE_ROOT, { provider: "openai" }],
+    [ensureGooglePluginPath(), { provider: "google" }],
+  ];
+}
+
+function isMultiAuthEntry(entry) {
+  if (entry === PLUGIN_NAME || entry === PACKAGE_ROOT || entry === GOOGLE_PLUGIN_LINK) return true;
+  if (!Array.isArray(entry)) return false;
+  return entry[0] === PLUGIN_NAME || entry[0] === PACKAGE_ROOT || entry[0] === GOOGLE_PLUGIN_LINK;
+}
 
 function configDir() {
   return join(homedir(), ".config", "opencode");
@@ -65,17 +95,11 @@ async function main() {
     plugins = [...cfg.plugin];
   }
 
-  const hasMultiAuth = plugins.some((entry) => {
-    if (entry === PLUGIN_NAME) return true;
-    return Array.isArray(entry) && entry[0] === PLUGIN_NAME;
-  });
+  const hasMultiAuth = plugins.some(isMultiAuthEntry);
 
   if (hasMultiAuth) {
-    plugins = plugins.filter((entry) => {
-      if (entry === PLUGIN_NAME) return false;
-      return !(Array.isArray(entry) && entry[0] === PLUGIN_NAME);
-    });
-    plugins.push(...PLUGIN_ENTRIES);
+    plugins = plugins.filter((entry) => !isMultiAuthEntry(entry));
+    plugins.push(...pluginEntries());
     cfg.plugin = plugins;
     writeConfig(cfg);
     console.log(`[multi-auth] Updated "${PLUGIN_NAME}" provider entries in opencode.json`);
@@ -90,7 +114,7 @@ async function main() {
       }
     }
 
-    plugins.push(...PLUGIN_ENTRIES);
+    plugins.push(...pluginEntries());
     cfg.plugin = plugins;
     writeConfig(cfg);
     console.log(`[multi-auth] Added "${PLUGIN_NAME}" provider entries to opencode.json`);
