@@ -73,7 +73,7 @@ opencode-multi-auth/
 - Node built-ins use `node:` imports; types use `import type` where possible.
 - Source of truth is `src/`; `dist/` is build output and package payload.
 - Provider ID intentionally equals `openai`, replacing the built-in provider.
-- Google models are registered as `google/gemini-*` / `google/gemma-*` aliases by loading a second plugin instance with `{ "provider": "google" }`.
+- Google models are registered as `google/gemini-*` / `google/gemma-*` aliases by loading a second plugin instance with `{ "provider": "google" }`; use a distinct path such as `opencode-multi-auth-google` because OpenCode deduplicates identical plugin paths and `AuthHook.provider` is a single string, not a providers array.
 - OAuth only for real accounts. `DUMMY_API_KEY` exists because OpenCode provider plumbing expects an API key.
 - Google AI Studio keys use `ManagedAccount.apiKey` and the separate `~/.config/opencode/google-accounts.json` store; do not mix them into OpenAI OAuth refresh flows.
 - Built-in OpenCode `google` provider auth is imported into the Google API-key pool on plugin dispose, account listing, or Gemini use, not during plugin startup; rotation uses `google/gemini-*` model syntax.

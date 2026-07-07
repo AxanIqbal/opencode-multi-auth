@@ -29,13 +29,17 @@ cd opencode-multi-auth
 bun install && bun run build
 ```
 
-Then add both provider instances to `~/.config/opencode/opencode.json`:
+Then add both provider instances to `~/.config/opencode/opencode.json`. OpenCode's current plugin API exposes one `auth.provider` per plugin instance, so `providers: ["openai", "google"]` is not supported. Use two distinct plugin paths so OpenCode does not deduplicate the instances:
+
+```bash
+ln -sfn /absolute/path/to/opencode-multi-auth /absolute/path/to/opencode-multi-auth-google
+```
 
 ```json
 {
   "plugin": [
     ["/absolute/path/to/opencode-multi-auth", { "provider": "openai" }],
-    ["/absolute/path/to/opencode-multi-auth", { "provider": "google" }]
+    ["/absolute/path/to/opencode-multi-auth-google", { "provider": "google" }]
   ]
 }
 ```
