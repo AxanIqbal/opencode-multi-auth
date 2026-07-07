@@ -574,6 +574,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       }
 
       if (isGeminiModel(model)) {
+        googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
         const geminiModel = model;
         const inputUrl = typeof input === "string" ? input : input instanceof Request ? input.url : input.href;
         const parsedUrl = new URL(inputUrl);
@@ -1178,6 +1179,10 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
   // ── Return hooks ───────────────────────────────────────
 
   return {
+    dispose: async () => {
+      googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
+    },
+
     auth: {
       provider: PROVIDER_ID,
       loader,
@@ -1297,6 +1302,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         args: {},
         async execute() {
           const accounts = manager.list();
+          googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
           const googleAccounts = googleManager.list();
           if (accounts.length === 0 && googleAccounts.length === 0) {
             return [

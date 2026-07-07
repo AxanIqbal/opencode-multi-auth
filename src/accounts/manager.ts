@@ -119,6 +119,16 @@ export class AccountManager {
     }
   }
 
+  importApiKeyFromOpenCodeAuth(provider: string, label?: string): void {
+    const auth = readJSON<Record<string, unknown>>(OPENCODE_AUTH_FILE);
+    if (!auth) return;
+
+    const entry = auth[provider] as { type?: string; key?: string } | undefined;
+    if (entry?.type === "api" && entry.key) {
+      this.addApiKey(entry.key, label);
+    }
+  }
+
   // ── Account management ───────────────────────────────────
 
   /** Add a new account or update an existing one by refresh token or userId+accountId. */
