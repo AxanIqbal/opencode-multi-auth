@@ -13,6 +13,7 @@ export class AccountManager {
   private roundRobinCursor = 0;
   private strategyInitialized = false;
   private config: PluginConfig;
+  private accountsFile: string;
   /** Serializes select/selectExcluding to prevent concurrent same-account selection */
   private selectMutex: Promise<void> = Promise.resolve();
   /** Accounts currently being used by an in-flight request */
@@ -30,15 +31,16 @@ export class AccountManager {
     }
   }
 
-  constructor(config?: Partial<PluginConfig>) {
+  constructor(config?: Partial<PluginConfig>, accountsFile = ACCOUNTS_FILE) {
     this.config = resolveConfig(config);
+    this.accountsFile = accountsFile;
   }
 
   // ── Persistence ──────────────────────────────────────────
 
   /** Load accounts from disk. */
   load(): void {
-    const store = readJSON<AccountsStore>(ACCOUNTS_FILE);
+    const store = readJSON<AccountsStore>(this.accountsFile);
     if (store?.version === 1 && Array.isArray(store.accounts)) {
       this.accounts = store.accounts;
       this.activeIndex = store.activeAccountIndex ?? 0;
@@ -50,7 +52,7 @@ export class AccountManager {
 
   /** Save accounts to disk, merging concurrent changes from other processes. */
   save(): void {
-    const diskStore = readJSON<AccountsStore>(ACCOUNTS_FILE);
+    const diskStore = readJSON<AccountsStore>(this.accountsFile);
     const diskAccounts: ManagedAccount[] =
       diskStore?.version === 1 && Array.isArray(diskStore.accounts)
         ? diskStore.accounts.map((a) => ({ ...a }))
@@ -60,7 +62,9 @@ export class AccountManager {
       if (a.userId && a.accountId && b.userId && b.accountId) {
         return a.userId === b.userId && a.accountId === b.accountId;
       }
-      return a.refresh === b.refresh || a.index === b.index;
+      if (a.refresh && b.refresh) return a.refresh === b.refresh;
+      if (a.apiKey && b.apiKey) return a.apiKey === b.apiKey;
+      return a.index === b.index;
     };
 
     const matchedDiskAccounts = new Set<ManagedAccount>();
@@ -87,7 +91,7 @@ export class AccountManager {
       activeAccountIndex: this.activeIndex,
       roundRobinCursor: this.roundRobinCursor,
     };
-    writeJSON(ACCOUNTS_FILE, store);
+    writeJSON(this.accountsFile, store);
 
     if (this.config.debug) {
       for (const acct of this.accounts) {
@@ -133,7 +137,7 @@ export class AccountManager {
       if (info.userId && a.userId && info.accountId && a.accountId) {
         return a.userId === info.userId && a.accountId === info.accountId;
       }
-      return a.refresh === refreshToken;
+      return !!a.refresh && a.refresh === refreshToken;
     });
 
     if (existing) {
@@ -173,6 +177,39 @@ export class AccountManager {
     this.strategyInitialized = false;
     if (!this.config.quietMode) {
       console.log(`[multi-auth] Added account: ${label || email || account.index}`);
+    }
+    this.save();
+    return account;
+  }
+
+  addApiKey(apiKey: string, label?: string): ManagedAccount {
+    const trimmed = apiKey.trim();
+    const existing = this.accounts.find((a) => a.apiKey === trimmed);
+
+    if (existing) {
+      if (label) existing.label = label;
+      existing.consecutiveFailures = 0;
+      this.strategyInitialized = false;
+      if (!this.config.quietMode) {
+        console.log(`[multi-auth] Updated account: ${label || existing.index}`);
+      }
+      this.save();
+      return existing;
+    }
+
+    const account: ManagedAccount = {
+      index: this.accounts.length,
+      label,
+      addedAt: Date.now(),
+      apiKey: trimmed,
+      rateLimitResets: {},
+      consecutiveFailures: 0,
+    };
+
+    this.accounts.push(account);
+    this.strategyInitialized = false;
+    if (!this.config.quietMode) {
+      console.log(`[multi-auth] Added account: ${label || account.index}`);
     }
     this.save();
     return account;
@@ -350,6 +387,8 @@ export class AccountManager {
 
   /** Ensure the account has a valid (non-expired) access token. */
   async ensureValidToken(account: ManagedAccount): Promise<boolean> {
+    if (account.apiKey) return true;
+    if (!account.refresh) return false;
     if (
       account.expires &&
       account.expires > Date.now() + this.config.proactiveRefreshThresholdMs
@@ -376,6 +415,7 @@ export class AccountManager {
 
   private async _doRefresh(account: ManagedAccount): Promise<boolean> {
     try {
+      if (!account.refresh) return false;
       const result = await refreshAccessToken(account.refresh);
       if (result.type === "success") {
         account.access = result.access;
@@ -458,9 +498,9 @@ export class AccountManager {
     const key =
       account.userId && account.accountId
         ? `${account.userId}/${account.accountId}`
-        : account.refresh;
+        : account.refresh ?? account.apiKey ?? String(account.index);
     const found = this.accounts.find((a) => {
-      const aKey = a.userId && a.accountId ? `${a.userId}/${a.accountId}` : a.refresh;
+      const aKey = a.userId && a.accountId ? `${a.userId}/${a.accountId}` : a.refresh ?? a.apiKey ?? String(a.index);
       return aKey === key;
     });
     if (this.config.debug && found && found !== account) {

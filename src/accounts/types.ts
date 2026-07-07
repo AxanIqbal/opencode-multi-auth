@@ -34,7 +34,8 @@ export interface ManagedAccount {
   lastUsed?: number;
   priority?: number;
   /** OAuth refresh token — used to get new access tokens */
-  refresh: string;
+  refresh?: string;
+  apiKey?: string;
   /** Current access token (may be expired, refreshed on use) */
   access?: string;
   /** Expiry timestamp (ms) for the access token */

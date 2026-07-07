@@ -42,17 +42,39 @@ import {
   isRateLimit,
   parseRetryAfter,
 } from "./auth/tokens.js";
+import { GOOGLE_ACCOUNTS_FILE } from "./lib/storage.js";
 
 // ── Constants ──────────────────────────────────────────────
 
 const PROVIDER_ID = "openai";
 
 const RESPONSES_ENDPOINT = `${CODEX_BASE_URL}/responses`;
+const GOOGLE_GENERATE_CONTENT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 const TOKEN_MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
 const REASONING_VARIANTS = ["low", "medium", "high", "xhigh"] as const;
 const REASONING_VARIANT_CONFIG = Object.fromEntries(
   REASONING_VARIANTS.map((effort) => [effort, { reasoningEffort: effort }]),
 );
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.5-flash-image",
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash-preview-tts",
+  "gemini-2.5-pro",
+  "gemini-2.5-pro-preview-tts",
+  "gemini-3-flash-preview",
+  "gemini-3-pro-image-preview",
+  "gemini-3.1-flash-image-preview",
+  "gemini-3.1-flash-lite",
+  "gemini-3.1-pro-preview",
+  "gemini-3.1-pro-preview-customtools",
+  "gemini-3.5-flash",
+  "gemini-embedding-001",
+  "gemini-flash-latest",
+  "gemini-flash-lite-latest",
+  "gemma-4-26b-a4b-it",
+  "gemma-4-31b-it",
+];
 
 // ── Codex Responses API helpers ────────────────────────────
 
@@ -228,6 +250,83 @@ function toResponsesBody(chatBody: Record<string, unknown>): Record<string, unkn
   return body;
 }
 
+function isGeminiModel(model: string | undefined): model is string {
+  return !!model && model.startsWith("gemini-");
+}
+
+function toGoogleGenerateContentBody(chatBody: Record<string, unknown>): Record<string, unknown> {
+  const messages = (chatBody.messages as Array<Record<string, unknown>>) || [];
+  const systemParts: Array<{ text: string }> = [];
+  const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+
+  for (const message of messages) {
+    const text = typeof message.content === "string" ? message.content : JSON.stringify(message.content);
+    if (message.role === "system") {
+      systemParts.push({ text });
+      continue;
+    }
+    contents.push({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [{ text }],
+    });
+  }
+
+  const generationConfig: Record<string, unknown> = {};
+  if (typeof chatBody.max_tokens === "number") generationConfig.maxOutputTokens = chatBody.max_tokens;
+  if (typeof chatBody.max_completion_tokens === "number") generationConfig.maxOutputTokens = chatBody.max_completion_tokens;
+  if (typeof chatBody.temperature === "number") generationConfig.temperature = chatBody.temperature;
+  if (typeof chatBody.top_p === "number") generationConfig.topP = chatBody.top_p;
+
+  return {
+    contents,
+    ...(systemParts.length > 0 ? { systemInstruction: { parts: systemParts } } : {}),
+    ...(Object.keys(generationConfig).length > 0 ? { generationConfig } : {}),
+  };
+}
+
+async function wrapGoogleAsChatCompletion(
+  response: Response,
+  model: string | undefined,
+): Promise<Response> {
+  const body = await response.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> }; finishReason?: string }>;
+    usageMetadata?: {
+      promptTokenCount?: number;
+      candidatesTokenCount?: number;
+      totalTokenCount?: number;
+    };
+  };
+  const candidate = body.candidates?.[0];
+  const content = candidate?.content?.parts
+    ?.map((part) => part.text ?? "")
+    .join("") ?? "";
+  const usage = body.usageMetadata
+    ? {
+        prompt_tokens: body.usageMetadata.promptTokenCount ?? 0,
+        completion_tokens: body.usageMetadata.candidatesTokenCount ?? 0,
+        total_tokens: body.usageMetadata.totalTokenCount ?? 0,
+      }
+    : {};
+
+  return new Response(JSON.stringify({
+    id: `chatcmpl-${uuidv4()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: model || "",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: candidate?.finishReason?.toLowerCase() || "stop",
+      },
+    ],
+    usage,
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
 async function wrapSSEAsChatCompletion(
   sseResponse: Response,
   model: string | undefined,
@@ -399,7 +498,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
    const debug = cfg.debug;
 
     const manager = new AccountManager(cfg);
+    const googleManager = new AccountManager(cfg, GOOGLE_ACCOUNTS_FILE);
     manager.load();
+    googleManager.load();
     manager.importFromOpenCodeAuth();
    void manager.refreshExpiringTokens();
    const tokenMaintenanceTimer = setInterval(() => {
@@ -470,6 +571,118 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           hdrs["Retry-After"] = String(Math.ceil(cfg.rateLimitCooldownMs / 1000));
         }
         return new Response(JSON.stringify({ error: msg }), { status: 503, headers: hdrs });
+      }
+
+      if (isGeminiModel(model)) {
+        const geminiModel = model;
+        const inputUrl = typeof input === "string" ? input : input instanceof Request ? input.url : input.href;
+        const parsedUrl = new URL(inputUrl);
+        const isChatEndpoint = parsedUrl.pathname === "/v1/chat/completions" || parsedUrl.pathname === "/chat/completions";
+        if (!isChatEndpoint) return fetchWithTimeout(inputUrl, init);
+
+        const chatBody = bodyStr ? JSON.parse(bodyStr) as Record<string, unknown> : undefined;
+        if (!chatBody) {
+          return new Response(
+            JSON.stringify({ error: "Empty request body" }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        let googleAccount = await googleManager.select(model);
+        if (!googleAccount || !googleAccount.apiKey) {
+          return new Response(
+            JSON.stringify({ error: "No available Google API-key accounts" }),
+            { status: 503, headers: { "Content-Type": "application/json", "Retry-After": String(Math.ceil(cfg.rateLimitCooldownMs / 1000)) } },
+          );
+        }
+        const googleApiKey: string = googleAccount.apiKey;
+
+        if (!cfg.quietMode && googleManager.count() > 1) {
+          const id = googleAccount.label || `Google ${googleAccount.index + 1}`;
+          if (
+            googleAccount.index !== lastToastAccount ||
+            now - lastToastTime > TOAST_DEBOUNCE
+          ) {
+            lastToastAccount = googleAccount.index;
+            lastToastTime = now;
+            showToast(
+              client,
+              `[multi-auth] ${id} (${googleAccount.index + 1}/${googleManager.count()})`,
+              "info",
+            );
+          }
+        }
+
+        const googleBody = toGoogleGenerateContentBody(chatBody);
+        const requestUrl = `${GOOGLE_GENERATE_CONTENT_BASE_URL}/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(googleApiKey)}`;
+        const requestInit: RequestInit = {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(googleBody),
+        };
+
+        if (debug) {
+          console.log(`[multi-auth] → ${googleAccount.label || `google-${googleAccount.index}`} ${model} (google)`);
+        }
+
+        let response: Response;
+        try {
+          response = await fetchWithTimeout(requestUrl, requestInit);
+        } catch (err) {
+          googleManager.releasePending(googleAccount.index);
+          return new Response(
+            JSON.stringify({ error: `Network error: ${err instanceof Error ? err.message : String(err)}` }),
+            { status: 502, headers: { "Content-Type": "application/json" } },
+          );
+        }
+
+        if (response.ok) {
+          googleManager.releasePending(googleAccount.index);
+          return wrapGoogleAsChatCompletion(response, model);
+        }
+
+        if (isRateLimit(response.status) || response.status === 401 || response.status === 403 || response.status === 400) {
+          const retryBody = await response.clone().text().catch(() => undefined);
+          const cooldown = isRateLimit(response.status) ? parseRetryAfter(response, retryBody) : cfg.rateLimitCooldownMs;
+          googleManager.markRateLimited(googleAccount, cooldown, model);
+          const excluded = new Set<number>([googleAccount.index]);
+          googleManager.releasePending(googleAccount.index);
+          let next = await googleManager.selectExcluding(excluded, model, false);
+          while (next?.apiKey) {
+            const nextApiKey: string = next.apiKey;
+            const nextUrl = `${GOOGLE_GENERATE_CONTENT_BASE_URL}/${encodeURIComponent(geminiModel)}:generateContent?key=${encodeURIComponent(nextApiKey)}`;
+            let retryResponse: Response;
+            try {
+              retryResponse = await fetchWithTimeout(nextUrl, requestInit);
+            } catch {
+              googleManager.releasePending(next.index);
+              excluded.add(next.index);
+              next = await googleManager.selectExcluding(excluded, model, false);
+              continue;
+            }
+
+            if (retryResponse.ok) {
+              googleManager.releasePending(next.index);
+              return wrapGoogleAsChatCompletion(retryResponse, model);
+            }
+
+            if (isRateLimit(retryResponse.status) || retryResponse.status === 401 || retryResponse.status === 403 || retryResponse.status === 400) {
+              const nextBody = await retryResponse.clone().text().catch(() => undefined);
+              const nextCooldown = isRateLimit(retryResponse.status) ? parseRetryAfter(retryResponse, nextBody) : cfg.rateLimitCooldownMs;
+              googleManager.markRateLimited(next, nextCooldown, model);
+              googleManager.releasePending(next.index);
+              excluded.add(next.index);
+              next = await googleManager.selectExcluding(excluded, model, false);
+              continue;
+            }
+
+            googleManager.releasePending(next.index);
+            return retryResponse;
+          }
+        }
+
+        googleManager.releasePending(googleAccount.index);
+        return response;
       }
 
       let account = await manager.select(model);
@@ -1042,6 +1255,38 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           type: "api",
           label: "OpenAI API Key",
         },
+        {
+          type: "api",
+          label: "Google API Key",
+          prompts: [
+            {
+              type: "text",
+              key: "api_key",
+              message: "Paste your Google AI Studio API key:",
+              placeholder: "AIza...",
+            },
+            {
+              type: "text",
+              key: "label",
+              message: "Label for this Google account/key:",
+              placeholder: "personal / work / project name",
+            },
+          ],
+          authorize: async (inputs) => {
+            const apiKey = inputs?.api_key?.trim();
+            if (!apiKey) {
+              console.error("[multi-auth] Google API key is required");
+              return { type: "failed" };
+            }
+            const account = googleManager.addApiKey(apiKey, inputs?.label?.trim() || undefined);
+            console.log(`[multi-auth] Google API key added: ${account.label || `Google ${account.index + 1}`}`);
+            return {
+              type: "success",
+              key: DUMMY_API_KEY,
+              provider: PROVIDER_ID,
+            };
+          },
+        },
       ],
     },
 
@@ -1052,9 +1297,10 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
         args: {},
         async execute() {
           const accounts = manager.list();
-          if (accounts.length === 0) {
+          const googleAccounts = googleManager.list();
+          if (accounts.length === 0 && googleAccounts.length === 0) {
             return [
-              "OpenAI Multi-Account Status",
+              "Multi-Account Status",
               "",
               "  No accounts configured.",
               "",
@@ -1085,6 +1331,17 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             lines.push(`  ${status} #${acct.index + 1} ${label}${plan}${priority}${quota}${limited}`);
           }
 
+          lines.push("", `Google API-Key Accounts (${googleAccounts.length} accounts)`);
+          for (const acct of googleAccounts) {
+            const label = acct.label || `Google ${acct.index + 1}`;
+            const priority = ` priority=${acct.priority ?? 0}`;
+            const status = acct.consecutiveFailures >= 3 ? "[DISABLED]" : "[READY]";
+            const limited = acct.globalRateLimitReset && acct.globalRateLimitReset > now
+              ? ` (rate-limited until ${new Date(acct.globalRateLimitReset).toLocaleTimeString()})`
+              : "";
+            lines.push(`  ${status} #${acct.index + 1} ${label}${priority}${limited}`);
+          }
+
           return lines.join("\n");
         },
       }),
@@ -1103,6 +1360,21 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           return `Set #${account.index + 1} ${label} priority=${account.priority ?? 0}. Lower numbers are selected first.`;
         },
       }),
+      "multi-auth-set-google-priority": tool({
+        description: "Set a Google API-key account priority. Lower numbers are selected first; higher numbers are fallback accounts.",
+        args: {
+          account: tool.schema.number().int().min(1).describe("Displayed Google account number from multi-auth-list, starting at 1."),
+          priority: tool.schema.number().int().min(0).describe("Selection priority. 0 is preferred; larger numbers are fallback tiers."),
+        },
+        async execute(args) {
+          const account = googleManager.setPriority(args.account - 1, args.priority);
+          if (!account) {
+            return `No Google account #${args.account}. Run multi-auth-list to see available accounts.`;
+          }
+          const label = account.label || `Google ${account.index + 1}`;
+          return `Set Google #${account.index + 1} ${label} priority=${account.priority ?? 0}. Lower numbers are selected first.`;
+        },
+      }),
     },
 
     // ── Config hook: register tool + models ────────────
@@ -1118,6 +1390,11 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
           "Use the multi-auth-set-priority tool to set the requested account number and priority, then output the result EXACTLY as returned, without any additional text.",
         description: "Set an OpenAI account priority. Lower numbers are selected first.",
       };
+      cfg.command["multi-auth-set-google-priority"] = {
+        template:
+          "Use the multi-auth-set-google-priority tool to set the requested Google account number and priority, then output the result EXACTLY as returned, without any additional text.",
+        description: "Set a Google API-key account priority. Lower numbers are selected first.",
+      };
       cfg.experimental = cfg.experimental || {};
       cfg.experimental.primary_tools = cfg.experimental.primary_tools || [];
       if (!cfg.experimental.primary_tools.includes("multi-auth-list")) {
@@ -1125,6 +1402,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
       }
       if (!cfg.experimental.primary_tools.includes("multi-auth-set-priority")) {
         cfg.experimental.primary_tools.push("multi-auth-set-priority");
+      }
+      if (!cfg.experimental.primary_tools.includes("multi-auth-set-google-priority")) {
+        cfg.experimental.primary_tools.push("multi-auth-set-google-priority");
       }
 
       // Register models exposed by the Codex backend for ChatGPT accounts.
@@ -1148,6 +1428,11 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
             ...(model.variants ?? {}),
             ...REASONING_VARIANT_CONFIG,
           };
+        }
+      }
+      for (const id of GEMINI_MODELS) {
+        if (!models[id]) {
+          models[id] = { name: id };
         }
       }
     },

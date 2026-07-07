@@ -1,7 +1,7 @@
 {
   "plugin": ["opencode-multi-auth"],
   "experimental": {
-    "primary_tools": ["multi-auth-list", "multi-auth-set-priority"]
+    "primary_tools": ["multi-auth-list", "multi-auth-set-priority", "multi-auth-set-google-priority"]
   },
   "command": {
     "multi-auth-list": {
@@ -11,6 +11,10 @@
     "multi-auth-set-priority": {
       "template": "Use the multi-auth-set-priority tool to set the requested account number and priority, then output the result EXACTLY as returned, without any additional text.",
       "description": "Set an OpenAI account priority. Lower numbers are selected first."
+    },
+    "multi-auth-set-google-priority": {
+      "template": "Use the multi-auth-set-google-priority tool to set the requested Google account number and priority, then output the result EXACTLY as returned, without any additional text.",
+      "description": "Set a Google API-key account priority. Lower numbers are selected first."
     }
   }
 }

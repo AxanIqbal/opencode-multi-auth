@@ -10,6 +10,13 @@ export const ACCOUNTS_FILE = join(
   "openai-accounts.json",
 );
 
+export const GOOGLE_ACCOUNTS_FILE = join(
+  homedir(),
+  ".config",
+  "opencode",
+  "google-accounts.json",
+);
+
 /** Path to OpenCode's own auth file (for importing existing accounts) */
 export const OPENCODE_AUTH_FILE = join(
   homedir(),
