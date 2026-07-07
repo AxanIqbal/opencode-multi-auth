@@ -60,7 +60,7 @@ opencode-multi-auth/
 | `customFetch` | nested function | `src/index.ts:441` | Request rewrite, account choice, retries, response wrapping. |
 | `AccountManager` | class | `src/accounts/manager.ts:10` | Persistent account pool and health state. |
 | `ManagedAccount` | interface | `src/accounts/types.ts:18` | On-disk and in-memory account shape; includes OpenAI tokens or Google API key. |
-| `GEMINI_MODELS` | const | `src/index.ts:58` | Registered Google/Gemini/Gemma aliases exposed under `openai/`. |
+| `GEMINI_MODELS` | const | `src/google.ts:5` | Registered Google/Gemini/Gemma aliases exposed under `google/`. |
 | `toGoogleGenerateContentBody` | function | `src/index.ts:257` | Converts Chat Completions message body to Google `generateContent`. |
 | `PluginConfig` | interface | `src/accounts/types.ts:66` | Env-derived behavior toggles. |
 | `parseRetryAfter` | function | `src/auth/tokens.ts:190` | Converts provider reset hints into cooldown ms. |
@@ -72,10 +72,10 @@ opencode-multi-auth/
 - Node built-ins use `node:` imports; types use `import type` where possible.
 - Source of truth is `src/`; `dist/` is build output and package payload.
 - Provider ID intentionally equals `openai`, replacing the built-in provider.
-- Google models are registered as `openai/gemini-*` / `openai/gemma-*` aliases because this single plugin loader is attached to provider `openai`; `google/*` requests are not intercepted by this plugin.
+- Google models are registered as `google/gemini-*` / `google/gemma-*` aliases by loading a second plugin instance with `{ "provider": "google" }`.
 - OAuth only for real accounts. `DUMMY_API_KEY` exists because OpenCode provider plumbing expects an API key.
 - Google AI Studio keys use `ManagedAccount.apiKey` and the separate `~/.config/opencode/google-accounts.json` store; do not mix them into OpenAI OAuth refresh flows.
-- Built-in OpenCode `google` provider auth is imported into the Google API-key pool on plugin dispose, account listing, or Gemini use, not during plugin startup; rotation still requires `openai/gemini-*` model syntax.
+- Built-in OpenCode `google` provider auth is imported into the Google API-key pool on plugin dispose, account listing, or Gemini use, not during plugin startup; rotation uses `google/gemini-*` model syntax.
 - Config is env-only through `envConfig()` plus `DEFAULT_CONFIG`; vars use `OPENCODE_MULTI_AUTH_*`.
 - Rate limits are per-model by default. `OPENCODE_MULTI_AUTH_PER_MODEL=0` switches to global cooldowns.
 - Account file saves are immediate after cooldown, quota, add/remove, and token refresh changes; `save()` first merges disk state from other processes.
@@ -103,7 +103,7 @@ bun run typecheck   # tsc --noEmit
 opencode plugin add "$(pwd)"
 opencode auth login
 opencode run -m openai/gpt-5.5 "hello"
-opencode run -m openai/gemini-2.5-flash "hello"
+opencode run -m google/gemini-2.5-flash "hello"
 ```
 
 ## NOTES
@@ -113,7 +113,7 @@ opencode run -m openai/gemini-2.5-flash "hello"
 - No test suite, lint config, formatter config, hooks, or CI is configured; use `bun run typecheck`, `bun run build`, and a real `opencode run -m openai/...` smoke test after behavior changes.
 - This project uses Bun. Keep `bun.lock` authoritative and avoid adding npm lockfiles.
 - Available OpenAI/Codex models are registered in `src/index.ts` and documented in `README.md`: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`, each GPT model with reasoning variants.
-- Available Google aliases are registered in `GEMINI_MODELS` and documented in `README.md`; user-facing command syntax is `openai/<alias>`, e.g. `openai/gemini-2.5-flash`.
+- Available Google aliases are registered in `src/google.ts` and documented in `README.md`; user-facing command syntax is `google/<alias>`, e.g. `google/gemini-2.5-flash`.
 - The compact repo does not warrant child AGENTS.md files yet: `src/accounts` is dense but only two files; `src/auth` and `src/lib` are single-purpose.
 - Storage paths: OpenAI accounts at `~/.config/opencode/openai-accounts.json`, Google API keys at `~/.config/opencode/google-accounts.json`, OpenCode auth import at `~/.local/share/opencode/auth.json`, session state at `~/.local/share/opencode/instance.json`.
 - `scripts/install.js` still uses `execSync("opencode auth login")`; the shell-free `execFileSync` convention currently applies to browser launch in `src/index.ts`.

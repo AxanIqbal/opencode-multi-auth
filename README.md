@@ -21,20 +21,22 @@ The plugin registers itself as provider `openai`, replacing the built-in one. Ev
 
 ## Install
 
-Clone from GitHub, build, and add as a local plugin:
+Clone from GitHub and build:
 
 ```bash
 git clone https://github.com/AxanIqbal/opencode-multi-auth.git
 cd opencode-multi-auth
 bun install && bun run build
-opencode plugin add "$(pwd)"
 ```
 
-Or manually add the local path to `~/.config/opencode/opencode.json`:
+Then add both provider instances to `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["/absolute/path/to/opencode-multi-auth"]
+  "plugin": [
+    ["/absolute/path/to/opencode-multi-auth", { "provider": "openai" }],
+    ["/absolute/path/to/opencode-multi-auth", { "provider": "google" }]
+  ]
 }
 ```
 
@@ -67,7 +69,7 @@ opencode run -m openai/gpt-5.5 --variant high "explain quantum computing"
 opencode run -m openai/gpt-5.4-mini "list accounts"
 
 # Gemini aliases route through the Google API-key pool
-opencode run -m openai/gemini-2.5-flash "hello from gemini"
+opencode run -m google/gemini-2.5-flash "hello from gemini"
 ```
 
 ### Available models
@@ -79,7 +81,7 @@ The plugin registers these Codex-specific models:
 
 All GPT models support `--variant`: `low`, `medium`, `high`, `xhigh`.
 
-Gemini aliases are registered under `openai/` because this plugin owns the `openai` loader that performs key rotation:
+Gemini aliases are registered under `google/` by the plugin's Google provider instance:
 
 - `gemini-2.5-flash`
 - `gemini-2.5-flash-image`
@@ -130,7 +132,7 @@ Opens `https://auth.openai.com/oauth/authorize` with the official OpenCode clien
 
 ### Google API keys
 
-Choose "Google API Key" under the plugin's `openai` provider in `opencode auth login` once per key for immediate multi-key rotation. If you log in to OpenCode's built-in `google` provider, OpenCode stores one current key in its own auth file; the plugin imports that current key after login shutdown, and also before `multi-auth-list` or `openai/gemini-*` use. Requests to `openai/gemini-*` use stored keys in priority/rotation order. OpenCode model names like `google/gemini-*` are not intercepted by this plugin because OpenCode currently attaches this loader to one provider ID; use the same model suffix with `openai/` to get rotation.
+Choose "Google API Key" under the `google` provider in `opencode auth login` once per key for immediate multi-key rotation. If you log in to OpenCode's built-in `google` provider, OpenCode stores one current key in its own auth file; the plugin imports that current key after login shutdown, and also before `multi-auth-list` or `google/gemini-*` use. Requests to `google/gemini-*` use stored keys in priority/rotation order.
 
 ## Configuration
 

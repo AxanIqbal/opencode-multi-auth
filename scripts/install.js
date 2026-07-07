@@ -17,6 +17,10 @@ import { createInterface } from "node:readline";
 import { execSync } from "node:child_process";
 
 const PLUGIN_NAME = "opencode-multi-auth";
+const PLUGIN_ENTRIES = [
+  [PLUGIN_NAME, { provider: "openai" }],
+  [PLUGIN_NAME, { provider: "google" }],
+];
 
 function configDir() {
   return join(homedir(), ".config", "opencode");
@@ -56,13 +60,25 @@ async function main() {
   const cfg = readConfig();
 
   // Read existing plugins list
-  const plugins = [];
+  let plugins = [];
   if (Array.isArray(cfg.plugin)) {
-    plugins.push(...cfg.plugin.map(String));
+    plugins = [...cfg.plugin];
   }
 
-  if (plugins.includes(PLUGIN_NAME)) {
-    console.log(`[multi-auth] Plugin "${PLUGIN_NAME}" is already registered in opencode.json`);
+  const hasMultiAuth = plugins.some((entry) => {
+    if (entry === PLUGIN_NAME) return true;
+    return Array.isArray(entry) && entry[0] === PLUGIN_NAME;
+  });
+
+  if (hasMultiAuth) {
+    plugins = plugins.filter((entry) => {
+      if (entry === PLUGIN_NAME) return false;
+      return !(Array.isArray(entry) && entry[0] === PLUGIN_NAME);
+    });
+    plugins.push(...PLUGIN_ENTRIES);
+    cfg.plugin = plugins;
+    writeConfig(cfg);
+    console.log(`[multi-auth] Updated "${PLUGIN_NAME}" provider entries in opencode.json`);
   } else {
     if (!autoYes) {
       const answer = await ask(
@@ -74,10 +90,10 @@ async function main() {
       }
     }
 
-    plugins.push(PLUGIN_NAME);
+    plugins.push(...PLUGIN_ENTRIES);
     cfg.plugin = plugins;
     writeConfig(cfg);
-    console.log(`[multi-auth] Added "${PLUGIN_NAME}" to opencode.json`);
+    console.log(`[multi-auth] Added "${PLUGIN_NAME}" provider entries to opencode.json`);
   }
 
   // Login prompt

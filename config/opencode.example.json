@@ -1,5 +1,8 @@
 {
-  "plugin": ["opencode-multi-auth"],
+  "plugin": [
+    ["opencode-multi-auth", { "provider": "openai" }],
+    ["opencode-multi-auth", { "provider": "google" }]
+  ],
   "experimental": {
     "primary_tools": ["multi-auth-list", "multi-auth-set-priority", "multi-auth-set-google-priority"]
   },

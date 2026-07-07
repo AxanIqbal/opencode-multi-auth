@@ -125,7 +125,7 @@ export class AccountManager {
 
     const entry = auth[provider] as { type?: string; key?: string } | undefined;
     if (entry?.type === "api" && entry.key) {
-      this.addApiKey(entry.key, label);
+      this.addApiKey(entry.key, label, { updateExistingLabel: false });
     }
   }
 
@@ -192,14 +192,24 @@ export class AccountManager {
     return account;
   }
 
-  addApiKey(apiKey: string, label?: string): ManagedAccount {
+  addApiKey(
+    apiKey: string,
+    label?: string,
+    options: { updateExistingLabel?: boolean } = {},
+  ): ManagedAccount {
     const trimmed = apiKey.trim();
     const existing = this.accounts.find((a) => a.apiKey === trimmed);
+    const updateExistingLabel = options.updateExistingLabel ?? true;
 
     if (existing) {
-      if (label) existing.label = label;
+      let changed = false;
+      if (label && updateExistingLabel && existing.label !== label) {
+        existing.label = label;
+        changed = true;
+      }
       existing.consecutiveFailures = 0;
       this.strategyInitialized = false;
+      if (!changed) return existing;
       if (!this.config.quietMode) {
         console.log(`[multi-auth] Updated account: ${label || existing.index}`);
       }
