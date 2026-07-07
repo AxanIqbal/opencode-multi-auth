@@ -1,6 +1,6 @@
-import type { AccountManager } from "./accounts/manager.js";
-import type { PluginConfig } from "./accounts/types.js";
-import { DUMMY_API_KEY, isRateLimit, parseRetryAfter } from "./auth/tokens.js";
+import type { AccountManager } from "../accounts/manager.js";
+import type { PluginConfig } from "../accounts/types.js";
+import { DUMMY_API_KEY, isRateLimit, parseRetryAfter } from "../auth/tokens.js";
 
 export const GEMINI_MODELS = [
   "gemini-2.5-flash",
