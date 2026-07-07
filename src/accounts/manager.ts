@@ -16,8 +16,8 @@ export class AccountManager {
   private accountsFile: string;
   /** Serializes select/selectExcluding to prevent concurrent same-account selection */
   private selectMutex: Promise<void> = Promise.resolve();
-  /** Accounts currently being used by an in-flight request */
-  private pendingAccounts = new Set<number>();
+  /** Accounts currently being used by an in-flight request, keyed by stable identity */
+  private pendingAccounts = new Set<string>();
 
   private async withSelectMutex<T>(fn: () => T): Promise<T> {
     let unlock: () => void;
@@ -169,6 +169,7 @@ export class AccountManager {
     }
 
     const account: ManagedAccount = {
+      id: crypto.randomUUID(),
       index: this.accounts.length,
       label,
       email,
@@ -218,6 +219,7 @@ export class AccountManager {
     }
 
     const account: ManagedAccount = {
+      id: crypto.randomUUID(),
       index: this.accounts.length,
       label,
       addedAt: Date.now(),
@@ -291,6 +293,7 @@ export class AccountManager {
         if (selected) {
           this.activeIndex = selected.index;
           selected.lastUsed = Date.now();
+          this.pendingAccounts.add(this.pendingKey(selected));
           return selected;
         }
       }
@@ -311,6 +314,7 @@ export class AccountManager {
             this.roundRobinCursor = (idx + 1) % this.accounts.length;
           }
           acct.lastUsed = now;
+          this.pendingAccounts.add(this.pendingKey(acct));
           return acct;
         }
       }
@@ -334,7 +338,7 @@ export class AccountManager {
         if (selected) {
           this.activeIndex = selected.index;
           selected.lastUsed = now;
-          this.pendingAccounts.add(selected.index);
+          this.pendingAccounts.add(this.pendingKey(selected));
           return selected;
         }
       }
@@ -351,7 +355,7 @@ export class AccountManager {
         if (this.isAvailable(acct, model, now)) {
           this.activeIndex = acct.index;
           acct.lastUsed = now;
-          this.pendingAccounts.add(acct.index);
+          this.pendingAccounts.add(this.pendingKey(acct));
           return acct;
         }
       }
@@ -361,8 +365,8 @@ export class AccountManager {
     });
   }
 
-  releasePending(index: number): void {
-    this.pendingAccounts.delete(index);
+  releasePending(account: ManagedAccount): void {
+    this.pendingAccounts.delete(this.pendingKey(account));
   }
 
   // ── Health ───────────────────────────────────────────────
@@ -545,7 +549,19 @@ export class AccountManager {
   }
 
   private normalizeIndices(): void {
-    this.accounts.forEach((a, i) => (a.index = i));
+    this.accounts.forEach((a, i) => {
+      a.id ??= crypto.randomUUID();
+      a.index = i;
+    });
+  }
+
+  /** Stable identity for an account, independent of its mutable array index. */
+  private pendingKey(account: ManagedAccount): string {
+    if (account.id) return `id:${account.id}`;
+    if (account.userId && account.accountId) return `${account.userId}/${account.accountId}`;
+    if (account.refresh) return `r:${account.refresh}`;
+    if (account.apiKey) return `k:${account.apiKey}`;
+    return `i:${account.index}`;
   }
 
   private priorityOf(account: ManagedAccount): number {
@@ -573,7 +589,7 @@ export class AccountManager {
 
   private isAvailable(account: ManagedAccount, model: string | undefined, now: number): boolean {
     if (account.consecutiveFailures >= 3) return false;
-    if (this.pendingAccounts.has(account.index)) return false;
+    if (this.pendingAccounts.has(this.pendingKey(account))) return false;
     if (account.globalRateLimitReset && account.globalRateLimitReset > now) return false;
     if (model && this.config.perModelRateLimits) {
       const modelReset = account.rateLimitResets[model];

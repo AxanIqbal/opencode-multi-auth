@@ -103,7 +103,7 @@ export function createGoogleLoader(options: {
       try {
         response = await fetchWithTimeout(prepared.url, prepared.init);
       } catch (err) {
-        googleManager.releasePending(account.index);
+        googleManager.releasePending(account);
         return new Response(
           JSON.stringify({ error: `Network error: ${err instanceof Error ? err.message : String(err)}` }),
           { status: 502, headers: { "Content-Type": "application/json" } },
@@ -111,7 +111,7 @@ export function createGoogleLoader(options: {
       }
 
       if (response.ok) {
-        googleManager.releasePending(account.index);
+        googleManager.releasePending(account);
         return response;
       }
 
@@ -121,7 +121,7 @@ export function createGoogleLoader(options: {
         googleManager.markRateLimited(account, cooldown, model);
         await notify(`[multi-auth] ${account.label || `Google ${account.index + 1}`} unavailable for ${model ?? "Google"}. Trying another key.`, "warning");
         const excluded = new Set<number>([account.index]);
-        googleManager.releasePending(account.index);
+        googleManager.releasePending(account);
 
         let next = await googleManager.selectExcluding(excluded, model, false);
         while (next?.apiKey) {
@@ -131,14 +131,14 @@ export function createGoogleLoader(options: {
           try {
             retryResponse = await fetchWithTimeout(nextPrepared.url, nextPrepared.init);
           } catch {
-            googleManager.releasePending(next.index);
+            googleManager.releasePending(next);
             excluded.add(next.index);
             next = await googleManager.selectExcluding(excluded, model, false);
             continue;
           }
 
           if (retryResponse.ok) {
-            googleManager.releasePending(next.index);
+            googleManager.releasePending(next);
             return retryResponse;
           }
 
@@ -147,13 +147,13 @@ export function createGoogleLoader(options: {
             const retryCooldown = isRateLimit(retryResponse.status) ? parseRetryAfter(retryResponse, retryBody) : cfg.rateLimitCooldownMs;
             googleManager.markRateLimited(next, retryCooldown, model);
             await notify(`[multi-auth] ${next.label || `Google ${next.index + 1}`} unavailable for ${model ?? "Google"}. Trying another key.`, "warning");
-            googleManager.releasePending(next.index);
+            googleManager.releasePending(next);
             excluded.add(next.index);
             next = await googleManager.selectExcluding(excluded, model, false);
             continue;
           }
 
-          googleManager.releasePending(next.index);
+          googleManager.releasePending(next);
           return retryResponse;
         }
 
@@ -161,7 +161,7 @@ export function createGoogleLoader(options: {
         return retryAfterResponse(`All Google API-key accounts are unavailable for ${model ?? "this request"}`, model);
       }
 
-      googleManager.releasePending(account.index);
+      googleManager.releasePending(account);
       return response;
     }
 

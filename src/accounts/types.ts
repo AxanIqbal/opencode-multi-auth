@@ -16,6 +16,7 @@ export interface QuotaSnapshot {
 }
 
 export interface ManagedAccount {
+  id?: string;
   /** Index within the accounts array (auto-assigned) */
   index: number;
   /** Human-readable label (email or custom name) */

@@ -319,6 +319,7 @@ export function createOpenAILoader(options: {
 
       const tokenOk = await manager.ensureValidToken(account);
       if (!tokenOk) {
+        const failed = account;
         const prev = account.index;
         const next = await manager.selectExcluding(new Set([prev]), model);
         if (next) {
@@ -327,18 +328,18 @@ export function createOpenAILoader(options: {
             const to = next.label || next.email || `Acct ${next.index + 1}`;
             showToast(`[multi-auth] Token refresh failed for ${from}, switching to ${to}`, "warning");
           }
-          manager.releasePending(prev);
+          manager.releasePending(failed);
           account = next;
           const tokenOk2 = await manager.ensureValidToken(account);
           if (!tokenOk2) {
-            manager.releasePending(account.index);
+            manager.releasePending(account);
             return new Response(
               JSON.stringify({ error: "Token refresh failed for all available accounts" }),
               { status: 401, headers: { "Content-Type": "application/json" } },
             );
           }
         } else {
-          manager.releasePending(prev);
+          manager.releasePending(failed);
           return new Response(
             JSON.stringify({ error: "Token refresh failed, no fallback accounts" }),
             { status: 401, headers: { "Content-Type": "application/json" } },
@@ -356,8 +357,18 @@ export function createOpenAILoader(options: {
       let requestInit: RequestInit;
 
       if (isChatEndpoint) {
-        const chatBody = bodyStr ? JSON.parse(bodyStr) : undefined;
+        let chatBody: Record<string, unknown> | undefined;
+        try {
+          chatBody = bodyStr ? JSON.parse(bodyStr) : undefined;
+        } catch {
+          manager.releasePending(account);
+          return new Response(
+            JSON.stringify({ error: "Invalid request body" }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
         if (!chatBody) {
+          manager.releasePending(account);
           return new Response(
             JSON.stringify({ error: "Empty request body" }),
             { status: 400, headers: { "Content-Type": "application/json" } },
@@ -412,7 +423,7 @@ export function createOpenAILoader(options: {
       try {
         response = await fetchWithTimeout(requestUrl, requestInit);
       } catch (err) {
-        manager.releasePending(account.index);
+        manager.releasePending(account);
         if (cfg.debug) {
           console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -473,7 +484,7 @@ export function createOpenAILoader(options: {
         }
 
         const excluded = new Set<number>([account.index]);
-        manager.releasePending(account.index);
+        manager.releasePending(account);
         let next = await manager.selectExcluding(excluded, model, false);
         while (next) {
           if (!cfg.quietMode) {
@@ -491,7 +502,7 @@ export function createOpenAILoader(options: {
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -501,11 +512,11 @@ export function createOpenAILoader(options: {
           }
 
           if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
           if (retryResponse.ok) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             return retryResponse;
           }
 
@@ -535,13 +546,13 @@ export function createOpenAILoader(options: {
               } catch {}
             }
             manager.markRateLimited(next, retryCooldown, model);
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             excluded.add(next.index);
             next = await manager.selectExcluding(excluded, model, false);
             continue;
           }
 
-          manager.releasePending(next.index);
+          manager.releasePending(next);
           return retryResponse;
         }
 
@@ -559,7 +570,7 @@ export function createOpenAILoader(options: {
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(account));
           } catch (err) {
-            manager.releasePending(account.index);
+            manager.releasePending(account);
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -570,7 +581,7 @@ export function createOpenAILoader(options: {
               try {
                 retryResponse2 = await fetchWithTimeout(requestUrl, withAccount(next));
               } catch (err2) {
-                manager.releasePending(next.index);
+                manager.releasePending(next);
                 if (cfg.debug) {
                   console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err2 instanceof Error ? err2.message : String(err2)}`);
                 }
@@ -582,10 +593,10 @@ export function createOpenAILoader(options: {
                 );
               }
               if (isChatEndpoint && retryResponse2.ok) {
-                manager.releasePending(next.index);
+                manager.releasePending(next);
                 return wrapSSEAsChatCompletion(retryResponse2, model);
               }
-              manager.releasePending(next.index);
+              manager.releasePending(next);
               return retryResponse2;
             }
             return new Response(
@@ -596,22 +607,22 @@ export function createOpenAILoader(options: {
             );
           }
           if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(account.index);
+            manager.releasePending(account);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
-          manager.releasePending(account.index);
+          manager.releasePending(account);
           return retryResponse;
         }
 
         const next = await manager.selectExcluding(new Set([account.index]), model);
         if (next) {
-          manager.releasePending(account.index);
+          manager.releasePending(account);
           await manager.ensureValidToken(next);
           let retryResponse: Response;
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -623,14 +634,14 @@ export function createOpenAILoader(options: {
             );
           }
           if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
-          manager.releasePending(next.index);
+          manager.releasePending(next);
           return retryResponse;
         }
 
-        manager.releasePending(account.index);
+        manager.releasePending(account);
         return response;
       }
 
@@ -642,13 +653,13 @@ export function createOpenAILoader(options: {
             const to = next.label || next.email || `Acct ${next.index + 1}`;
             showToast(`[multi-auth] Model issue on ${from}, trying ${to}`, "info");
           }
-          manager.releasePending(account.index);
+          manager.releasePending(account);
           await manager.ensureValidToken(next);
           let retryResponse: Response;
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
           } catch (err) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
@@ -660,10 +671,10 @@ export function createOpenAILoader(options: {
             );
           }
           if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(next.index);
+            manager.releasePending(next);
             return wrapSSEAsChatCompletion(retryResponse, model);
           }
-          manager.releasePending(next.index);
+          manager.releasePending(next);
           return retryResponse;
         }
       }
@@ -671,11 +682,11 @@ export function createOpenAILoader(options: {
       if (isChatEndpoint && response.ok) {
         const quota = extractQuotaFromHeaders(response.headers);
         if (quota) manager.updateQuota(account, quota, model);
-        manager.releasePending(account.index);
+        manager.releasePending(account);
         return wrapSSEAsChatCompletion(response, model);
       }
 
-      manager.releasePending(account.index);
+      manager.releasePending(account);
       return response;
     }
 
