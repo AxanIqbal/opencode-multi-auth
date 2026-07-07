@@ -26,7 +26,7 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { tool, type Plugin, type PluginInput, type AuthOuathResult } from "@opencode-ai/plugin";
+import { tool, type Plugin, type PluginInput, type AuthOAuthResult } from "@opencode-ai/plugin";
 import type { Auth } from "@opencode-ai/sdk";
 import { AccountManager } from "./accounts/manager.js";
 import type { ManagedAccount, PluginConfig, QuotaSnapshot } from "./accounts/types.js";
@@ -1097,7 +1097,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
     state: string,
     url: string,
     server: { waitForCode: (s: string) => Promise<{ code: string } | null>; close: () => void },
-  ): AuthOuathResult {
+  ): AuthOAuthResult {
     return {
       url,
       method: "auto",
@@ -1133,7 +1133,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput) => {
     verifier: string,
     expectedState: string,
     url: string,
-  ): AuthOuathResult {
+  ): AuthOAuthResult {
     return {
       url,
       method: "code",
