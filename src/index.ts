@@ -413,6 +413,35 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
         {
           type: "api",
           label: "OpenAI API Key",
+          prompts: [
+            {
+              type: "text",
+              key: "api_key",
+              message: "Paste your OpenAI API key:",
+              placeholder: "sk-...",
+            },
+            {
+              type: "text",
+              key: "label",
+              message: "Label for this OpenAI API key:",
+              placeholder: "personal / work / project name",
+            },
+          ],
+          authorize: async (inputs) => {
+            const apiKey = inputs?.api_key?.trim();
+            if (!apiKey) {
+              console.error("[multi-auth] OpenAI API key is required");
+              return { type: "failed" };
+            }
+
+            const account = manager.addApiKey(apiKey, inputs?.label?.trim() || undefined);
+            console.log(`[multi-auth] OpenAI API key added: ${account.label || `OpenAI ${account.index + 1}`}`);
+            return {
+              type: "success",
+              key: apiKey,
+              provider: OPENAI_PROVIDER_ID,
+            };
+          },
         },
       ],
     },

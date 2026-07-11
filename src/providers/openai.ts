@@ -233,11 +233,12 @@ function buildAuthHeaders(
   account: ManagedAccount,
 ): Headers {
   const headers = new Headers(init?.headers);
+  const bearerToken = account.apiKey ?? account.access;
   headers.delete("authorization");
   headers.delete("Authorization");
   headers.delete("openai-authorization");
-  headers.set("authorization", `Bearer ${account.access}`);
-  headers.set("openai-authorization", `Bearer ${account.access}`);
+  headers.set("authorization", `Bearer ${bearerToken}`);
+  headers.set("openai-authorization", `Bearer ${bearerToken}`);
 
   if (account.accountId) {
     headers.set("chatgpt-account-id", account.accountId);
