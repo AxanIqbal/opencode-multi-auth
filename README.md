@@ -56,7 +56,7 @@ opencode auth login
 Choose one of:
 - **ChatGPT OAuth (Browser)** — opens your browser for login, handles callback automatically
 - **Add Account (Paste Token)** — paste an access token and refresh token directly (headless)
-- **ChatGPT OAuth (Manual / Headless)** — get a URL to open, paste the resulting code
+- **ChatGPT OAuth (Manual / Headless)** — open the device login URL, enter the one-time code, then paste it back after approval
 - **OpenAI API Key** — standard API key fallback
 - **Google API Key** — stores an AI Studio key in the Google key pool
 
@@ -133,6 +133,10 @@ Get an access token and refresh token from an existing ChatGPT session, then use
 ### OAuth browser flow
 
 Opens `https://auth.openai.com/oauth/authorize` with the official OpenCode client ID and PKCE. After authorization, tokens are exchanged and stored automatically.
+
+### OAuth manual/headless flow
+
+Uses the official Codex device-code flow instead of a localhost callback: open `https://auth.openai.com/codex/device`, enter the one-time code shown by OpenCode, then paste that code back after approval. The plugin polls OpenAI's device auth endpoint and exchanges the issued authorization code with `https://auth.openai.com/deviceauth/callback`.
 
 ### Google API keys
 

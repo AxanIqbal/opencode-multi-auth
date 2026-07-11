@@ -185,6 +185,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
     verifier: string,
     state: string,
     url: string,
+    redirectUri: string,
     server: { waitForCode: (s: string) => Promise<{ code: string } | null>; close: () => void },
   ): AuthOAuthResult {
     return {
@@ -197,7 +198,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
         if (!result) return { type: "failed" };
 
         // Exchange code for tokens
-        const tokens = await exchangeCode(result.code, verifier);
+        const tokens = await exchangeCode(result.code, verifier, redirectUri);
         if (tokens.type !== "success") return { type: "failed" };
 
         // Add to account manager
@@ -222,6 +223,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
     verifier: string,
     expectedState: string,
     url: string,
+    redirectUri: string,
   ): AuthOAuthResult {
     return {
       url,
@@ -246,7 +248,38 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
 
         if (!code) return { type: "failed" };
 
-        const tokens = await exchangeCode(code, verifier);
+        const tokens = await exchangeCode(code, verifier, redirectUri);
+        if (tokens.type !== "success") return { type: "failed" };
+
+        const info = tokens.access ? decodeJWT(tokens.access) : null;
+        const email = info ? extractEmail(info) : undefined;
+        manager.addAccount(tokens.refresh, tokens.access, tokens.expires, email);
+
+        return {
+          type: "success",
+          provider: OPENAI_PROVIDER_ID,
+          refresh: tokens.refresh,
+          access: tokens.access,
+          expires: tokens.expires,
+        };
+      },
+    };
+  }
+
+  function buildDeviceCodeFlow(flow: DeviceCodeFlow): AuthOAuthResult {
+    return {
+      url: flow.verificationUrl,
+      method: "code",
+      instructions:
+        `Open the URL, enter this one-time code, then paste the same code here after approval: ${flow.userCode}`,
+      callback: async (input: string) => {
+        const pastedCode = normalizeDeviceUserCode(input);
+        if (pastedCode && pastedCode !== normalizeDeviceUserCode(flow.userCode)) {
+          console.error("[multi-auth] Device code mismatch");
+          return { type: "failed" };
+        }
+
+        const tokens = await completeDeviceCodeFlow(flow);
         if (tokens.type !== "success") return { type: "failed" };
 
         const info = tokens.access ? decodeJWT(tokens.access) : null;
@@ -312,16 +345,16 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
           type: "oauth",
           label: "ChatGPT OAuth (Browser)",
           authorize: async () => {
-            const flow = await createOAuthFlow();
+            const flow = await createOAuthFlow(BROWSER_REDIRECT_URI);
             const serverInfo = await startLocalServer(flow.state);
             openBrowser(flow.url);
 
             if (!serverInfo.ready) {
               serverInfo.close();
-              return buildManualFlow(flow.pkceVerifier, flow.state, flow.url);
+              return buildManualFlow(flow.pkceVerifier, flow.state, flow.url, flow.redirectUri);
             }
 
-            return buildAutoFlow(flow.pkceVerifier, flow.state, flow.url, serverInfo);
+            return buildAutoFlow(flow.pkceVerifier, flow.state, flow.url, flow.redirectUri, serverInfo);
           },
         },
         {
@@ -373,8 +406,8 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
           type: "oauth",
           label: "ChatGPT OAuth (Manual / Headless)",
           authorize: async () => {
-            const flow = await createOAuthFlow();
-            return buildManualFlow(flow.pkceVerifier, flow.state, flow.url);
+            const flow = await createDeviceCodeFlow();
+            return buildDeviceCodeFlow(flow);
           },
         },
         {
@@ -532,7 +565,30 @@ const OAUTH_ISSUER = "https://auth.openai.com";
 const OAUTH_AUTHORIZE_URL = `${OAUTH_ISSUER}/oauth/authorize`;
 const OAUTH_TOKEN_URL = `${OAUTH_ISSUER}/oauth/token`;
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const REDIRECT_URI = "http://localhost:1455/auth/callback";
+const BROWSER_REDIRECT_URI = "http://localhost:1455/auth/callback";
+const DEVICE_REDIRECT_URI = `${OAUTH_ISSUER}/deviceauth/callback`;
+const DEVICE_VERIFICATION_URL = `${OAUTH_ISSUER}/codex/device`;
+const DEVICE_USER_CODE_URL = `${OAUTH_ISSUER}/api/accounts/deviceauth/usercode`;
+const DEVICE_TOKEN_URL = `${OAUTH_ISSUER}/api/accounts/deviceauth/token`;
+const DEVICE_AUTH_TIMEOUT_MS = 15 * 60 * 1000;
+
+type OAuthFlow = {
+  url: string;
+  state: string;
+  pkceVerifier: string;
+  redirectUri: string;
+};
+
+type DeviceCodeFlow = {
+  verificationUrl: string;
+  userCode: string;
+  deviceAuthId: string;
+  intervalMs: number;
+};
+
+type TokenResult =
+  | { type: "success"; access: string; refresh: string; expires: number }
+  | { type: "failed" };
 
 /** Generate PKCE challenge pair. */
 async function createPKCE(): Promise<{ verifier: string; challenge: string }> {
@@ -554,18 +610,14 @@ function base64URLEncode(bytes: Uint8Array): string {
 }
 
 /** Create the full OAuth authorization flow parameters. */
-async function createOAuthFlow(): Promise<{
-  url: string;
-  state: string;
-  pkceVerifier: string;
-}> {
+async function createOAuthFlow(redirectUri: string): Promise<OAuthFlow> {
   const state = base64URLEncode(crypto.getRandomValues(new Uint8Array(16)));
   const pkce = await createPKCE();
 
   const params = new URLSearchParams({
     client_id: OAUTH_CLIENT_ID,
-      redirect_uri: REDIRECT_URI,
-      response_type: "code",
+    redirect_uri: redirectUri,
+    response_type: "code",
     scope: "openid profile email offline_access",
     state,
     code_challenge: pkce.challenge,
@@ -579,6 +631,7 @@ async function createOAuthFlow(): Promise<{
     url: `${OAUTH_AUTHORIZE_URL}?${params.toString()}`,
     state,
     pkceVerifier: pkce.verifier,
+    redirectUri,
   };
 }
 
@@ -586,17 +639,15 @@ async function createOAuthFlow(): Promise<{
 async function exchangeCode(
   code: string,
   verifier: string,
-): Promise<
-  | { type: "success"; access: string; refresh: string; expires: number }
-  | { type: "failed" }
-> {
+  redirectUri: string,
+): Promise<TokenResult> {
   try {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       client_id: OAUTH_CLIENT_ID,
       code,
       code_verifier: verifier,
-      redirect_uri: REDIRECT_URI,
+      redirect_uri: redirectUri,
     });
 
     const res = await fetch(OAUTH_TOKEN_URL, {
@@ -629,6 +680,101 @@ async function exchangeCode(
   }
 }
 
+async function createDeviceCodeFlow(): Promise<DeviceCodeFlow> {
+  const response = await fetch(DEVICE_USER_CODE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: OAUTH_CLIENT_ID }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Device code request failed: ${response.status} ${text}`);
+  }
+
+  const data: unknown = await response.json();
+  const record = asRecord(data);
+  const deviceAuthId = getString(record, "device_auth_id");
+  const userCode = getString(record, "user_code") ?? getString(record, "usercode");
+  const intervalSeconds = getNumberLike(record, "interval") ?? 5;
+
+  if (!deviceAuthId || !userCode) {
+    throw new Error("Device code response missing device_auth_id or user_code");
+  }
+
+  return {
+    verificationUrl: DEVICE_VERIFICATION_URL,
+    userCode,
+    deviceAuthId,
+    intervalMs: Math.max(1, intervalSeconds) * 1000,
+  };
+}
+
+async function completeDeviceCodeFlow(flow: DeviceCodeFlow): Promise<TokenResult> {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < DEVICE_AUTH_TIMEOUT_MS) {
+    const response = await fetch(DEVICE_TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_auth_id: flow.deviceAuthId,
+        user_code: flow.userCode,
+      }),
+    });
+
+    if (response.ok) {
+      const data: unknown = await response.json();
+      const record = asRecord(data);
+      const authorizationCode = getString(record, "authorization_code");
+      const verifier = getString(record, "code_verifier");
+
+      if (!authorizationCode || !verifier) {
+        console.error("[multi-auth] Device auth token response missing authorization_code or code_verifier");
+        return { type: "failed" };
+      }
+
+      return exchangeCode(authorizationCode, verifier, DEVICE_REDIRECT_URI);
+    }
+
+    if (response.status !== 403 && response.status !== 404) {
+      const text = await response.text().catch(() => "");
+      console.error(`[multi-auth] Device auth failed: ${response.status} ${text}`);
+      return { type: "failed" };
+    }
+
+    await sleep(flow.intervalMs);
+  }
+
+  console.error("[multi-auth] Device auth timed out after 15 minutes");
+  return { type: "failed" };
+}
+
+function normalizeDeviceUserCode(code: string): string {
+  return code.replace(/\s+/g, "").toUpperCase();
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+}
+
+function getString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function getNumberLike(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Start a local server to receive the OAuth callback. */
 async function startLocalServer(
   expectedState: string,
@@ -642,7 +788,7 @@ async function startLocalServer(
   let closeTimer: ReturnType<typeof setTimeout> | undefined;
 
   const server = createServer((req, res) => {
-    const url = new URL(req.url ?? "/", REDIRECT_URI);
+    const url = new URL(req.url ?? "/", BROWSER_REDIRECT_URI);
     if (url.pathname !== "/auth/callback") {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not found");

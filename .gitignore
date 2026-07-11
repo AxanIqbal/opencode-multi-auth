@@ -10,3 +10,5 @@ auth.json
 .DS_Store
 /dist
 .idea
+
+.omo/run-continuation
