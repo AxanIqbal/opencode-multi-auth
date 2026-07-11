@@ -297,11 +297,37 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
     };
   }
 
+  function buildApiKeyFlow(options: {
+    readonly apiKey: string;
+    readonly label: string;
+    readonly provider: ProviderMode;
+    readonly accountManager: AccountManager;
+  }): AuthOAuthResult {
+    return {
+      url: "",
+      method: "auto",
+      instructions: "Saving API key to the multi-auth account pool.",
+      callback: async () => {
+        if (!options.apiKey) return { type: "failed" };
+
+        const account = options.accountManager.addApiKey(options.apiKey, options.label);
+        const accountLabel = account.label || `${options.provider} ${account.index + 1}`;
+        console.log(`[multi-auth] API key added: ${accountLabel}`);
+
+        return {
+          type: "success",
+          key: options.apiKey,
+          provider: options.provider,
+        };
+      },
+    };
+  }
+
   // ── Return hooks ───────────────────────────────────────
 
   return {
     dispose: async () => {
-      googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
+      clearInterval(tokenMaintenanceTimer);
     },
 
     auth: {
@@ -309,7 +335,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
       loader: mode === GOOGLE_PROVIDER_ID ? googleLoader : openAILoader,
       methods: mode === GOOGLE_PROVIDER_ID ? [
         {
-          type: "api",
+          type: "oauth",
           label: "Google API Key",
           prompts: [
             {
@@ -317,6 +343,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
               key: "api_key",
               message: "Paste your Google AI Studio API key:",
               placeholder: "AIza...",
+              validate: (value) => value.trim().length > 0 ? undefined : "Required",
             },
             {
               type: "text",
@@ -325,20 +352,12 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
               placeholder: "personal / work / project name",
             },
           ],
-          authorize: async (inputs) => {
-            const apiKey = inputs?.api_key?.trim();
-            if (!apiKey) {
-              console.error("[multi-auth] Google API key is required");
-              return { type: "failed" };
-            }
-            const account = googleManager.addApiKey(apiKey, inputs?.label?.trim() || undefined);
-            console.log(`[multi-auth] Google API key added: ${account.label || `Google ${account.index + 1}`}`);
-            return {
-              type: "success",
-              key: apiKey,
-              provider: GOOGLE_PROVIDER_ID,
-            };
-          },
+          authorize: async (inputs) => buildApiKeyFlow({
+            apiKey: inputs?.api_key?.trim() ?? "",
+            label: inputs?.label?.trim() || "OpenCode Google",
+            provider: GOOGLE_PROVIDER_ID,
+            accountManager: googleManager,
+          }),
         },
       ] : [
         {
@@ -411,7 +430,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
           },
         },
         {
-          type: "api",
+          type: "oauth",
           label: "OpenAI API Key",
           prompts: [
             {
@@ -419,6 +438,7 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
               key: "api_key",
               message: "Paste your OpenAI API key:",
               placeholder: "sk-...",
+              validate: (value) => value.trim().length > 0 ? undefined : "Required",
             },
             {
               type: "text",
@@ -427,21 +447,12 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
               placeholder: "personal / work / project name",
             },
           ],
-          authorize: async (inputs) => {
-            const apiKey = inputs?.api_key?.trim();
-            if (!apiKey) {
-              console.error("[multi-auth] OpenAI API key is required");
-              return { type: "failed" };
-            }
-
-            const account = manager.addApiKey(apiKey, inputs?.label?.trim() || undefined);
-            console.log(`[multi-auth] OpenAI API key added: ${account.label || `OpenAI ${account.index + 1}`}`);
-            return {
-              type: "success",
-              key: apiKey,
-              provider: OPENAI_PROVIDER_ID,
-            };
-          },
+          authorize: async (inputs) => buildApiKeyFlow({
+            apiKey: inputs?.api_key?.trim() ?? "",
+            label: inputs?.label?.trim() || "OpenAI API Key",
+            provider: OPENAI_PROVIDER_ID,
+            accountManager: manager,
+          }),
         },
       ],
     },
@@ -452,8 +463,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
         description: "List all configured OpenAI accounts and their health status.",
         args: {},
         async execute() {
-          const accounts = manager.list();
+          manager.importApiKeyFromOpenCodeAuth("openai", "OpenAI API Key");
           googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
+          const accounts = manager.list();
           const googleAccounts = googleManager.list();
           if (accounts.length === 0 && googleAccounts.length === 0) {
             return [
