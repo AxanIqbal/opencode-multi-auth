@@ -63,6 +63,7 @@ export interface AccountsStore {
   accounts: ManagedAccount[];
   activeAccountIndex: number;
   roundRobinCursor: number;
+  removedAccountKeys?: string[];
 }
 
 /** Plugin configuration from env / opencode.json provider options */

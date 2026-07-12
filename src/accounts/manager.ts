@@ -14,6 +14,7 @@ export class AccountManager {
   private strategyInitialized = false;
   private config: PluginConfig;
   private accountsFile: string;
+  private removedAccountKeys = new Set<string>();
   /** Serializes select/selectExcluding to prevent concurrent same-account selection */
   private selectMutex: Promise<void> = Promise.resolve();
   /** Accounts currently being used by an in-flight request, keyed by stable identity */
@@ -45,6 +46,7 @@ export class AccountManager {
       this.accounts = store.accounts;
       this.activeIndex = store.activeAccountIndex ?? 0;
       this.roundRobinCursor = store.roundRobinCursor ?? this.activeIndex;
+      this.removedAccountKeys = new Set(store.removedAccountKeys ?? []);
       this.normalizeIndices();
       this.strategyInitialized = false;
     }
@@ -53,9 +55,14 @@ export class AccountManager {
   /** Save accounts to disk, merging concurrent changes from other processes. */
   save(): void {
     const diskStore = readJSON<AccountsStore>(this.accountsFile);
+    const removedAccountKeys = new Set(diskStore?.removedAccountKeys ?? []);
+    for (const key of this.removedAccountKeys) removedAccountKeys.add(key);
+
     const diskAccounts: ManagedAccount[] =
       diskStore?.version === 1 && Array.isArray(diskStore.accounts)
-        ? diskStore.accounts.map((a) => ({ ...a }))
+        ? diskStore.accounts
+          .filter((a) => !this.accountKeys(a).some((key) => removedAccountKeys.has(key)))
+          .map((a) => ({ ...a }))
         : [];
 
     const matches = (a: ManagedAccount, b: ManagedAccount): boolean => {
@@ -80,6 +87,7 @@ export class AccountManager {
     }
 
     this.accounts = diskAccounts;
+    this.removedAccountKeys = removedAccountKeys;
     this.normalizeIndices();
     if (this.activeIndex >= this.accounts.length) this.activeIndex = 0;
     this.roundRobinCursor = this.activeIndex;
@@ -90,6 +98,7 @@ export class AccountManager {
       accounts: this.accounts,
       activeAccountIndex: this.activeIndex,
       roundRobinCursor: this.roundRobinCursor,
+      removedAccountKeys: [...this.removedAccountKeys],
     };
     writeJSON(this.accountsFile, store);
 
@@ -113,9 +122,16 @@ export class AccountManager {
       | { type?: string; refresh?: string; access?: string; expires?: number }
       | undefined;
     if (oa?.type === "oauth" && oa.refresh) {
+      const refresh = oa.refresh.trim();
+      if (!refresh) return;
       // Deduplicate by refresh token
-      if (this.accounts.some((a) => a.refresh === oa.refresh)) return;
-      this.addAccount(oa.refresh, oa.access, oa.expires);
+      if (this.accounts.some((a) => a.refresh === refresh)) return;
+      const info = oa.access ? extractTokenInfo(oa.access) : {};
+      const importKeys = this.oauthAccountKeys(refresh, info.userId, info.accountId);
+      if (importKeys.some((key) => this.removedAccountKeys.has(key))) return;
+
+      if (!oa.access && this.accounts.some((a) => a.refresh)) return;
+      this.addAccount(refresh, oa.access, oa.expires);
     }
   }
 
@@ -125,7 +141,9 @@ export class AccountManager {
 
     const entry = auth[provider] as { type?: string; key?: string } | undefined;
     if (entry?.type === "api" && entry.key) {
-      this.addApiKey(entry.key, label, { updateExistingLabel: false });
+      const apiKey = entry.key.trim();
+      if (!apiKey || this.removedAccountKeys.has(`api:${apiKey}`)) return;
+      this.addApiKey(apiKey, label, { updateExistingLabel: false });
     }
   }
 
@@ -141,6 +159,7 @@ export class AccountManager {
     // Extract info from token
     const info = accessToken ? extractTokenInfo(accessToken) : {};
     const email = info.email;
+    this.clearRemovalKeys(this.oauthAccountKeys(refreshToken, info.userId, info.accountId));
 
     // Dedup: match by userId+accountId first, then by refresh token
     let existing = this.accounts.find((a) => {
@@ -199,6 +218,7 @@ export class AccountManager {
     options: { updateExistingLabel?: boolean } = {},
   ): ManagedAccount {
     const trimmed = apiKey.trim();
+    this.removedAccountKeys.delete(`api:${trimmed}`);
     const existing = this.accounts.find((a) => a.apiKey === trimmed);
     const updateExistingLabel = options.updateExistingLabel ?? true;
 
@@ -242,6 +262,7 @@ export class AccountManager {
     const idx = this.accounts.findIndex((a) => a.index === index);
     if (idx < 0) return false;
     const removed = this.accounts.splice(idx, 1)[0];
+    for (const key of this.accountKeys(removed)) this.removedAccountKeys.add(key);
     this.normalizeIndices();
     if (this.activeIndex >= this.accounts.length) {
       this.activeIndex = Math.max(0, this.accounts.length - 1);
@@ -553,6 +574,24 @@ export class AccountManager {
       a.id ??= crypto.randomUUID();
       a.index = i;
     });
+  }
+
+  private accountKeys(account: ManagedAccount): string[] {
+    const keys: string[] = [];
+    if (account.userId && account.accountId) keys.push(`oauth:${account.userId}/${account.accountId}`);
+    if (account.refresh) keys.push(`refresh:${account.refresh}`);
+    if (account.apiKey) keys.push(`api:${account.apiKey}`);
+    return keys;
+  }
+
+  private oauthAccountKeys(refresh: string, userId?: string, accountId?: string): string[] {
+    const keys = [`refresh:${refresh}`];
+    if (userId && accountId) keys.push(`oauth:${userId}/${accountId}`);
+    return keys;
+  }
+
+  private clearRemovalKeys(keys: string[]): void {
+    for (const key of keys) this.removedAccountKeys.delete(key);
   }
 
   /** Stable identity for an account, independent of its mutable array index. */

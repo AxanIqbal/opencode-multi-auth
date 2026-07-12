@@ -76,7 +76,6 @@ export function createGoogleLoader(options: {
       input: Request | string | URL,
       init?: RequestInit,
     ): Promise<Response> {
-      googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
       const inputUrl = typeof input === "string" ? input : input instanceof Request ? input.url : input.href;
       const model = extractGoogleModelFromUrl(inputUrl);
       let account = await googleManager.select(model);
@@ -174,7 +173,6 @@ export function createGoogleLoader(options: {
       return response;
     }
 
-    googleManager.importApiKeyFromOpenCodeAuth("google", "OpenCode Google");
     const firstAccount = googleManager.list().find((account) => account.apiKey);
     return {
       apiKey: firstAccount?.apiKey ?? DUMMY_API_KEY,

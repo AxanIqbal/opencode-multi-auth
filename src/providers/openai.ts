@@ -275,7 +275,6 @@ export function createOpenAILoader(options: {
       const model = extractModel(bodyStr);
       const now = Date.now();
       let lastRateLimitHeaders: Record<string, string> | undefined;
-      manager.importApiKeyFromOpenCodeAuth("openai", "OpenAI API Key");
 
       function retryAfterResponse(msg: string): Response {
         const reset = manager.getEarliestReset(model);
