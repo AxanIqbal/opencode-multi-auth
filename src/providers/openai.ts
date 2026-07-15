@@ -19,7 +19,7 @@ const REASONING_VARIANT_CONFIG = Object.fromEntries(
 );
 
 const CODEX_MODELS = [
-  "gpt-5.5", "gpt-5.4-mini", "codex-auto-review",
+  "gpt-5.6-terra-fast","gpt-5.6-terra","gpt-5.6-sol-fast","gpt-5.6-sol","gpt-5.6-luna-fast","gpt-5.6-luna","gpt-5.5", "gpt-5.4-mini", "codex-auto-review",
 ];
 
 interface SSEData {
