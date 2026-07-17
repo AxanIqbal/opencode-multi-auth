@@ -281,9 +281,6 @@ export function createOpenAILoader(options: {
         const hdrs: Record<string, string> = { "Content-Type": "application/json" };
 
         if (lastRateLimitHeaders) {
-          for (const key of ["retry-after-ms", "retry-after", "retry-after-ms"] as const) {
-            if (lastRateLimitHeaders[key]) hdrs[key] = lastRateLimitHeaders[key];
-          }
           for (const [key, val] of Object.entries(lastRateLimitHeaders)) {
             if (key.startsWith("x-ratelimit-")) hdrs[key] = val;
           }
@@ -449,7 +446,10 @@ export function createOpenAILoader(options: {
         }
 
         const retryBody = await response.clone().text().catch(() => undefined);
-        let cooldown = parseRetryAfter(response, retryBody);
+        let cooldown = Math.min(
+          parseRetryAfter(response, retryBody),
+          cfg.rateLimitCooldownMs,
+        );
 
         if (retryBody) {
           const quota = extractQuotaFromErrorBody(retryBody);
@@ -536,7 +536,10 @@ export function createOpenAILoader(options: {
               });
             }
             const retryBody = await retryResponse.clone().text().catch(() => undefined);
-            let retryCooldown = parseRetryAfter(retryResponse, retryBody);
+            let retryCooldown = Math.min(
+              parseRetryAfter(retryResponse, retryBody),
+              cfg.rateLimitCooldownMs,
+            );
             if (retryCooldown === 60_000 && retryBody) {
               try {
                 const body = JSON.parse(retryBody);
