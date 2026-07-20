@@ -628,7 +628,6 @@ export class AccountManager {
 
   private isAvailable(account: ManagedAccount, model: string | undefined, now: number): boolean {
     if (account.consecutiveFailures >= 3) return false;
-    if (this.pendingAccounts.has(this.pendingKey(account))) return false;
     if (account.globalRateLimitReset && account.globalRateLimitReset > now) return false;
     if (model && this.config.perModelRateLimits) {
       const modelReset = account.rateLimitResets[model];
