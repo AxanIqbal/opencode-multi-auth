@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { PluginInput } from "@opencode-ai/plugin";
 import type { AccountManager } from "../accounts/manager.js";
-import type { ManagedAccount, PluginConfig, QuotaSnapshot } from "../accounts/types.js";
+import type { ManagedAccount, PluginConfig, QuotaSnapshot, QuotaWindow } from "../accounts/types.js";
 import {
   CODEX_BASE_URL,
   DUMMY_API_KEY,
@@ -13,6 +13,7 @@ import {
 } from "../auth/tokens.js";
 
 const RESPONSES_ENDPOINT = `${CODEX_BASE_URL}/responses`;
+const WHAM_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 const REASONING_VARIANTS = ["low", "medium", "high", "xhigh"] as const;
 const REASONING_VARIANT_CONFIG = Object.fromEntries(
   REASONING_VARIANTS.map((effort) => [effort, { reasoningEffort: effort }]),
@@ -25,6 +26,46 @@ const CODEX_MODELS = [
 interface SSEData {
   event: string;
   data: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
+}
+
+function parseUsageWindow(value: unknown): QuotaWindow | undefined {
+  const window = asRecord(value);
+  if (!window) return undefined;
+
+  const usedPercent = window.used_percent;
+  const resetAt = window.reset_at;
+  const windowSeconds = window.limit_window_seconds;
+  if (typeof usedPercent !== "number" && typeof resetAt !== "number" && typeof windowSeconds !== "number") {
+    return undefined;
+  }
+
+  return {
+    ...(typeof usedPercent === "number" ? { usedPercent } : {}),
+    ...(typeof resetAt === "number" ? { resetsAt: resetAt * 1000 } : {}),
+    ...(typeof windowSeconds === "number" ? { windowMinutes: windowSeconds / 60 } : {}),
+  };
+}
+
+function parseWhamUsage(value: unknown): QuotaSnapshot | undefined {
+  const body = asRecord(value);
+  const rateLimit = asRecord(body?.rate_limit);
+  if (!rateLimit) return undefined;
+
+  const primary = parseUsageWindow(rateLimit.primary_window);
+  const secondary = parseUsageWindow(rateLimit.secondary_window);
+  if (!primary && !secondary) return undefined;
+
+  return {
+    primary,
+    secondary,
+    planType: typeof body?.plan_type === "string" ? body.plan_type : undefined,
+    rateLimitReachedType: typeof body?.rate_limit_reached_type === "string" ? body.rate_limit_reached_type : undefined,
+    updatedAt: Date.now(),
+  };
 }
 
 function parseSSE(body: string): SSEData[] {
@@ -266,6 +307,36 @@ export function createOpenAILoader(options: {
   let lastToastTime = 0;
   const toastDebounce = 5000;
 
+  async function refreshQuota(account: ManagedAccount, model: string | undefined): Promise<boolean> {
+    if (!account.access || !account.accountId) return false;
+
+    try {
+      const response = await fetchWithTimeout(WHAM_USAGE_ENDPOINT, {
+        headers: {
+          authorization: `Bearer ${account.access}`,
+          "chatgpt-account-id": account.accountId,
+          "user-agent": "Codex/codex_cli_rs",
+        },
+      }, 10_000);
+      if (!response.ok) {
+        if (cfg.debug) {
+          console.log(`[multi-auth] Quota refresh failed for ${account.label || account.email || account.index}: ${response.status}`);
+        }
+        return false;
+      }
+
+      const quota = parseWhamUsage(await response.json());
+      if (!quota) return false;
+      manager.updateQuota(account, quota, model);
+      return true;
+    } catch (error) {
+      if (cfg.debug) {
+        console.log(`[multi-auth] Quota refresh error for ${account.label || account.email || account.index}: ${String(error)}`);
+      }
+      return false;
+    }
+  }
+
   return async function openAILoader(): Promise<Record<string, unknown>> {
     async function customFetch(
       input: Request | string | URL,
@@ -295,6 +366,26 @@ export function createOpenAILoader(options: {
         return new Response(JSON.stringify({ error: msg }), { status: 503, headers: hdrs });
       }
 
+      async function selectQuotaEligible(
+        excluded: Set<number>,
+        allowFallback = true,
+      ): Promise<ManagedAccount | null> {
+        let next = await manager.selectExcluding(excluded, model, allowFallback);
+        while (next) {
+          if (
+            await manager.ensureValidToken(next) &&
+            (await refreshQuota(next, model) || !manager.requiresQuotaSnapshot(next)) &&
+            manager.hasQuotaCapacity(next, model)
+          ) {
+            return next;
+          }
+          manager.releasePending(next);
+          excluded.add(next.index);
+          next = await manager.selectExcluding(excluded, model, allowFallback);
+        }
+        return null;
+      }
+
       let account = await manager.select(model);
       if (!account) {
         return retryAfterResponse("No available OpenAI accounts");
@@ -319,7 +410,7 @@ export function createOpenAILoader(options: {
       if (!tokenOk) {
         const failed = account;
         const prev = account.index;
-        const next = await manager.selectExcluding(new Set([prev]), model);
+        const next = await selectQuotaEligible(new Set([prev]));
         if (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${prev + 1}`;
@@ -343,6 +434,36 @@ export function createOpenAILoader(options: {
             { status: 401, headers: { "Content-Type": "application/json" } },
           );
         }
+      }
+
+      const quotaExcluded = new Set<number>();
+      while (true) {
+        if (!await manager.ensureValidToken(account)) {
+          manager.releasePending(account);
+          quotaExcluded.add(account.index);
+          const next = await manager.selectExcluding(quotaExcluded, model, false);
+          if (!next) {
+            return new Response(
+              JSON.stringify({ error: "Token refresh failed for all available accounts" }),
+              { status: 401, headers: { "Content-Type": "application/json" } },
+            );
+          }
+          account = next;
+          continue;
+        }
+
+        const quotaUpdated = await refreshQuota(account, model);
+        if ((quotaUpdated || !manager.requiresQuotaSnapshot(account)) && manager.hasQuotaCapacity(account, model)) {
+          break;
+        }
+
+        quotaExcluded.add(account.index);
+        manager.releasePending(account);
+        const next = await manager.selectExcluding(quotaExcluded, model, false);
+        if (!next) {
+          return retryAfterResponse("No available OpenAI accounts within quota limits");
+        }
+        account = next;
       }
 
       const headers = buildAuthHeaders(init, account);
@@ -486,7 +607,7 @@ export function createOpenAILoader(options: {
 
         const excluded = new Set<number>([account.index]);
         manager.releasePending(account);
-        let next = await manager.selectExcluding(excluded, model, false);
+        let next = await selectQuotaEligible(excluded, false);
         while (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${account.index + 1}`;
@@ -508,7 +629,7 @@ export function createOpenAILoader(options: {
               console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
             excluded.add(next.index);
-            next = await manager.selectExcluding(excluded, model, false);
+            next = await selectQuotaEligible(excluded, false);
             continue;
           }
 
@@ -552,7 +673,7 @@ export function createOpenAILoader(options: {
             manager.markRateLimited(next, retryCooldown, model);
             manager.releasePending(next);
             excluded.add(next.index);
-            next = await manager.selectExcluding(excluded, model, false);
+            next = await selectQuotaEligible(excluded, false);
             continue;
           }
 
@@ -578,7 +699,7 @@ export function createOpenAILoader(options: {
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
-            const next = await manager.selectExcluding(new Set([account.index]), model);
+            const next = await selectQuotaEligible(new Set([account.index]));
             if (next) {
               await manager.ensureValidToken(next);
               let retryResponse2: Response;
@@ -618,7 +739,7 @@ export function createOpenAILoader(options: {
           return retryResponse;
         }
 
-        const next = await manager.selectExcluding(new Set([account.index]), model);
+        const next = await selectQuotaEligible(new Set([account.index]));
         if (next) {
           manager.releasePending(account);
           await manager.ensureValidToken(next);
@@ -650,7 +771,7 @@ export function createOpenAILoader(options: {
       }
 
       if (response.status === 400) {
-        const next = await manager.selectExcluding(new Set([account.index]), model);
+        const next = await selectQuotaEligible(new Set([account.index]));
         if (next) {
           if (!cfg.quietMode) {
             const from = account.label || account.email || `Acct ${account.index + 1}`;

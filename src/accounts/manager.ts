@@ -66,6 +66,7 @@ export class AccountManager {
         : [];
 
     const matches = (a: ManagedAccount, b: ManagedAccount): boolean => {
+      if (a.id && b.id) return a.id === b.id;
       if (a.userId && a.accountId && b.userId && b.accountId) {
         return a.userId === b.userId && a.accountId === b.accountId;
       }
@@ -79,8 +80,19 @@ export class AccountManager {
       const existing = diskAccounts.find((disk) => !matchedDiskAccounts.has(disk) && matches(mem, disk));
       if (existing) {
         matchedDiskAccounts.add(existing);
+        const diskCredentials = {
+          access: existing.access,
+          refresh: existing.refresh,
+          expires: existing.expires,
+        };
+        const preserveDiskCredentials = (existing.expires ?? 0) > (mem.expires ?? 0);
         const mergedResets = { ...existing.rateLimitResets, ...mem.rateLimitResets };
         Object.assign(existing, mem, { rateLimitResets: mergedResets });
+        if (preserveDiskCredentials) {
+          existing.access = diskCredentials.access;
+          existing.refresh = diskCredentials.refresh;
+          existing.expires = diskCredentials.expires;
+        }
       } else {
         diskAccounts.push({ ...mem });
       }
@@ -175,7 +187,7 @@ export class AccountManager {
       if (expires) existing.expires = expires;
       if (info.userId) existing.userId = info.userId;
       if (info.accountId) existing.accountId = info.accountId;
-      if (info.planType) existing.planType = info.planType;
+      if (info.planType !== undefined) existing.planType = info.planType;
       if (email) existing.email = email;
       if (label) existing.label = label;
       existing.consecutiveFailures = 0;
@@ -280,6 +292,15 @@ export class AccountManager {
     const account = this.accounts.find((a) => a.index === index);
     if (!account) return null;
     account.priority = priority;
+    this.strategyInitialized = false;
+    this.save();
+    return account;
+  }
+
+  setQuotaThreshold(index: number, thresholdPercent: number | null): ManagedAccount | null {
+    const account = this.accounts.find((a) => a.index === index);
+    if (!account) return null;
+    account.quotaThresholdPercent = thresholdPercent ?? undefined;
     this.strategyInitialized = false;
     this.save();
     return account;
@@ -415,7 +436,7 @@ export class AccountManager {
       target.quotaByModel = target.quotaByModel ?? {};
       target.quotaByModel[model] = snapshot;
     }
-    if (snapshot.planType) target.planType = snapshot.planType;
+    if (snapshot.planType !== undefined) target.planType = snapshot.planType;
     this.save();
   }
 
@@ -458,10 +479,26 @@ export class AccountManager {
     }
   }
 
+  private readLatestAccount(account: ManagedAccount): ManagedAccount | null {
+    const store = readJSON<AccountsStore>(this.accountsFile);
+    if (!store?.version || !Array.isArray(store.accounts)) return null;
+    return store.accounts.find((a) => {
+      if (account.id && a.id) return a.id === account.id;
+      if (account.userId && a.userId && account.accountId && a.accountId) {
+        return a.userId === account.userId && a.accountId === account.accountId;
+      }
+      return !!account.refresh && a.refresh === account.refresh;
+    }) ?? null;
+  }
+
   private async _doRefresh(account: ManagedAccount): Promise<boolean> {
     try {
       if (!account.refresh) return false;
-      const result = await refreshAccessToken(account.refresh);
+
+      const latest = this.readLatestAccount(account);
+      const refreshToken = latest?.refresh ?? account.refresh;
+
+      const result = await refreshAccessToken(refreshToken);
       if (result.type === "success") {
         account.access = result.access;
         account.refresh = result.refresh;
@@ -473,7 +510,7 @@ export class AccountManager {
         // Refresh extracted metadata
         const info = extractTokenInfo(result.access);
         if (info.accountId) account.accountId = info.accountId;
-        if (info.planType) account.planType = info.planType;
+        if (info.planType !== undefined) account.planType = info.planType;
         if (info.email) account.email = info.email;
 
         this.save();
@@ -482,9 +519,36 @@ export class AccountManager {
 
       // fatal error
       const code = result.code;
-      if (code === "refresh_token_reused" || code === "invalid_grant") {
+      if (code === "refresh_token_reused") {
+        const diskLatest = this.readLatestAccount(account);
+        if (
+          diskLatest?.refresh &&
+          diskLatest.refresh !== refreshToken &&
+          diskLatest.access &&
+          diskLatest.expires &&
+          diskLatest.expires > Date.now()
+        ) {
+          account.refresh = diskLatest.refresh;
+          account.access = diskLatest.access;
+          account.expires = diskLatest.expires;
+          account.consecutiveFailures = 0;
+          account.isRefreshing = false;
+          account.refreshPromise = undefined;
+          this.save();
+          return true;
+        }
+        this.markRefreshFailed(account, `Token reused: another process may have already refreshed. Re-auth needed.`);
+        account.consecutiveFailures = 10;
+        this.save();
+        if (!this.config.quietMode) {
+          console.error(
+            `[multi-auth] Account ${account.label || account.email || account.index} needs re-auth (refresh_token_reused)`,
+          );
+        }
+      } else if (code === "invalid_grant") {
         this.markRefreshFailed(account, `Token invalid: ${code}. Re-auth needed.`);
-        account.consecutiveFailures = 10;  // disable
+        account.consecutiveFailures = 10;
+        this.save();
         if (!this.config.quietMode) {
           console.error(
             `[multi-auth] Account ${account.label || account.email || account.index} needs re-auth (${code})`,
@@ -534,6 +598,15 @@ export class AccountManager {
     }
 
     return earliest;
+  }
+
+  hasQuotaCapacity(account: ManagedAccount, model?: string): boolean {
+    return this.isQuotaAvailable(this.resolveAccount(account), model, Date.now());
+  }
+
+  requiresQuotaSnapshot(account: ManagedAccount): boolean {
+    const target = this.resolveAccount(account);
+    return target.quotaThresholdPercent != null && !!target.planType && target.planType !== "free";
   }
 
   // ── Private helpers ──────────────────────────────────────
@@ -633,9 +706,17 @@ export class AccountManager {
       const modelReset = account.rateLimitResets[model];
       if (modelReset && modelReset > now) return false;
     }
+    return this.isQuotaAvailable(account, model, now);
+  }
+
+  private isQuotaAvailable(account: ManagedAccount, model: string | undefined, now: number): boolean {
     const quota = this.quotaFor(account, model);
     if (this.isQuotaCritical(quota?.primary, now)) return false;
     if (this.isQuotaCritical(quota?.secondary, now)) return false;
+    if (account.quotaThresholdPercent != null && account.planType && account.planType !== "free") {
+      if (this.exceedsAccountThreshold(quota?.primary, account.quotaThresholdPercent, now)) return false;
+      if (this.exceedsAccountThreshold(quota?.secondary, account.quotaThresholdPercent, now)) return false;
+    }
     return true;
   }
 
@@ -681,6 +762,16 @@ export class AccountManager {
     return !!window.resetsAt && window.resetsAt > now;
   }
 
+  private exceedsAccountThreshold(
+    window: QuotaSnapshot["primary"],
+    threshold: number,
+    now: number,
+  ): boolean {
+    if (typeof window?.usedPercent !== "number") return false;
+    if (window.usedPercent < threshold) return false;
+    return !!window.resetsAt && window.resetsAt > now;
+  }
+
   private quotaScore(account: ManagedAccount, model: string | undefined, now: number): number {
     const quota = this.quotaFor(account, model);
     const remaining = [quota?.primary, quota?.secondary]
@@ -704,6 +795,7 @@ export class AccountManager {
     for (const acct of this.accounts) {
       if (exclude.has(acct.index)) continue;
       if (acct.consecutiveFailures >= 3) continue;
+      if (!this.isQuotaAvailable(acct, model, now)) continue;
       const priority = this.priorityOf(acct);
 
       let reset = acct.globalRateLimitReset || 0;

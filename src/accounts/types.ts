@@ -47,6 +47,8 @@ export interface ManagedAccount {
   globalRateLimitReset?: number;
   quota?: QuotaSnapshot;
   quotaByModel?: Record<string, QuotaSnapshot>;
+  /** Per-account usage cap (0-100). Account is skipped when usagePercent exceeds this. Only applies to non-free plans. */
+  quotaThresholdPercent?: number;
   /** Consecutive failures for backoff */
   consecutiveFailures: number;
   /** Whether a token refresh is in flight */

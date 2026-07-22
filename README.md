@@ -122,6 +122,14 @@ opencode run -m openai/gpt-5.4-mini "set account 2 priority 10"
 
 Priorities are tiers: lower numbers are selected first, and the default is `0`. An account with priority `10` is only used when no priority `0` account is available for that model. Within the same priority tier, the configured selection strategy still applies.
 
+Set a per-account quota cap for paid ChatGPT plans:
+
+```
+opencode run -m openai/gpt-5.4-mini "set account 2 quota limit 60"
+```
+
+The plugin reads the Codex account quota before dispatching requests. A paid account at or above its cap is skipped until its quota window resets; use a limit of `0` to clear the cap. Free accounts are not capped.
+
 Rate-limited accounts are still checked for OAuth token refresh on plugin startup and every 30 minutes while the plugin process is running, so a long `resets_at` cooldown does not prevent token maintenance.
 
 ## Adding accounts

@@ -95,8 +95,11 @@ function formatQuota(quota: QuotaSnapshot | undefined, now: number): string {
   const parts: string[] = [];
   if (quota.primary) {
     const reset = formatReset(quota.primary.resetsAt, now);
+    const label = quota.primary.windowMinutes && quota.primary.windowMinutes >= 24 * 60
+      ? "weekly"
+      : "5h";
     if (typeof quota.primary.usedPercent === "number") {
-      parts.push(`5h ${Math.max(0, Math.round(100 - quota.primary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
+      parts.push(`${label} ${Math.max(0, Math.round(100 - quota.primary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
     } else if (reset) {
       parts.push(reset);
     }
@@ -104,8 +107,11 @@ function formatQuota(quota: QuotaSnapshot | undefined, now: number): string {
 
   if (quota.secondary) {
     const reset = formatReset(quota.secondary.resetsAt, now);
+    const label = quota.secondary.windowMinutes && quota.secondary.windowMinutes >= 24 * 60
+      ? "weekly"
+      : "5h";
     if (typeof quota.secondary.usedPercent === "number") {
-      parts.push(`weekly ${Math.max(0, Math.round(100 - quota.secondary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
+      parts.push(`${label} ${Math.max(0, Math.round(100 - quota.secondary.usedPercent))}% left${reset ? `, ${reset}` : ""}`);
     } else if (reset) {
       parts.push(reset);
     }
@@ -497,7 +503,8 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
               ? ` (rate-limited until ${new Date(acct.globalRateLimitReset).toLocaleTimeString()})`
               : "";
             const quota = formatQuota(acct.quota, now);
-            lines.push(`  ${status} #${acct.index + 1} ${label}${plan}${priority}${quota}${limited}`);
+            const threshold = acct.quotaThresholdPercent != null ? ` cap=${acct.quotaThresholdPercent}%` : "";
+            lines.push(`  ${status} #${acct.index + 1} ${label}${plan}${priority}${quota}${threshold}${limited}`);
           }
 
           lines.push("", `Google API-Key Accounts (${googleAccounts.length} accounts)`);
@@ -544,6 +551,24 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
           return `Set Google #${account.index + 1} ${label} priority=${account.priority ?? 0}. Lower numbers are selected first.`;
         },
       }),
+      "multi-auth-set-quota-limit": tool({
+        description: "Set a per-account usage cap percentage. Account is skipped when usage exceeds this threshold. Only applies to non-free tier accounts.",
+        args: {
+          account: tool.schema.number().int().min(1).describe("Displayed account number from multi-auth-list, starting at 1."),
+          threshold: tool.schema.number().int().min(0).max(100).describe("Maximum usage percentage (1-100) or 0 to clear the cap."),
+        },
+        async execute(args) {
+          const account = manager.setQuotaThreshold(args.account - 1, args.threshold === 0 ? null : args.threshold);
+          if (!account) {
+            return `No account #${args.account}. Run multi-auth-list to see available accounts.`;
+          }
+          const label = account.label || account.email || `Account ${account.index + 1}`;
+          if (args.threshold === 0) {
+            return `Cleared quota cap for #${account.index + 1} ${label}.`;
+          }
+          return `Set #${account.index + 1} ${label} quota cap=${account.quotaThresholdPercent}%. Account will be skipped when usage exceeds this (non-free plans only).`;
+        },
+      }),
     },
 
     // ── Config hook: register tool + models ────────────
@@ -564,6 +589,11 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
           "Use the multi-auth-set-google-priority tool to set the requested Google account number and priority, then output the result EXACTLY as returned, without any additional text.",
         description: "Set a Google API-key account priority. Lower numbers are selected first.",
       };
+      cfg.command["multi-auth-set-quota-limit"] = {
+        template:
+          "Use the multi-auth-set-quota-limit tool to set the requested account number and quota threshold percentage, then output the result EXACTLY as returned, without any additional text.",
+        description: "Set a per-account usage cap. Account is skipped above this threshold (non-free plans only).",
+      };
       cfg.experimental = cfg.experimental || {};
       cfg.experimental.primary_tools = cfg.experimental.primary_tools || [];
       if (!cfg.experimental.primary_tools.includes("multi-auth-list")) {
@@ -574,6 +604,9 @@ export const MultiAuthPlugin: Plugin = async ({ client }: PluginInput, options?:
       }
       if (!cfg.experimental.primary_tools.includes("multi-auth-set-google-priority")) {
         cfg.experimental.primary_tools.push("multi-auth-set-google-priority");
+      }
+      if (!cfg.experimental.primary_tools.includes("multi-auth-set-quota-limit")) {
+        cfg.experimental.primary_tools.push("multi-auth-set-quota-limit");
       }
 
       cfg.provider = cfg.provider || {};
