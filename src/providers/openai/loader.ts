@@ -1,263 +1,22 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { PluginInput } from "@opencode-ai/plugin";
-import type { AccountManager } from "../accounts/manager.js";
-import type { ManagedAccount, PluginConfig, QuotaSnapshot, QuotaWindow } from "../accounts/types.js";
+import type { AccountManager } from "../../accounts/manager.js";
+import type { ManagedAccount, PluginConfig } from "../../accounts/types.js";
 import {
   CODEX_BASE_URL,
   DUMMY_API_KEY,
   isRateLimit,
   parseRetryAfter,
   rewriteURL,
-} from "../auth/tokens.js";
+} from "../../auth/tokens.js";
+import { buildAuthHeaders } from "./headers.js";
+import {
+  createQuotaRefresher,
+  extractQuotaFromErrorBody,
+  extractQuotaFromHeaders,
+} from "./quota.js";
+import { toResponsesBody, wrapSSEAsChatCompletion } from "./request.js";
 
 const RESPONSES_ENDPOINT = `${CODEX_BASE_URL}/responses`;
-const WHAM_USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
-const REASONING_VARIANTS = ["low", "medium", "high", "xhigh"] as const;
-const REASONING_VARIANT_CONFIG = Object.fromEntries(
-  REASONING_VARIANTS.map((effort) => [effort, { reasoningEffort: effort }]),
-);
-
-const CODEX_MODELS = [
-  "gpt-5.6-terra-fast","gpt-5.6-terra","gpt-5.6-sol-fast","gpt-5.6-sol","gpt-5.6-luna-fast","gpt-5.6-luna","gpt-5.5", "gpt-5.4-mini", "codex-auto-review",
-];
-
-interface SSEData {
-  event: string;
-  data: string;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
-}
-
-function parseUsageWindow(value: unknown): QuotaWindow | undefined {
-  const window = asRecord(value);
-  if (!window) return undefined;
-
-  const usedPercent = window.used_percent;
-  const resetAt = window.reset_at;
-  const windowSeconds = window.limit_window_seconds;
-  if (typeof usedPercent !== "number" && typeof resetAt !== "number" && typeof windowSeconds !== "number") {
-    return undefined;
-  }
-
-  return {
-    ...(typeof usedPercent === "number" ? { usedPercent } : {}),
-    ...(typeof resetAt === "number" ? { resetsAt: resetAt * 1000 } : {}),
-    ...(typeof windowSeconds === "number" ? { windowMinutes: windowSeconds / 60 } : {}),
-  };
-}
-
-function parseWhamUsage(value: unknown): QuotaSnapshot | undefined {
-  const body = asRecord(value);
-  const rateLimit = asRecord(body?.rate_limit);
-  if (!rateLimit) return undefined;
-
-  const primary = parseUsageWindow(rateLimit.primary_window);
-  const secondary = parseUsageWindow(rateLimit.secondary_window);
-  if (!primary && !secondary) return undefined;
-
-  return {
-    primary,
-    secondary,
-    planType: typeof body?.plan_type === "string" ? body.plan_type : undefined,
-    rateLimitReachedType: typeof body?.rate_limit_reached_type === "string" ? body.rate_limit_reached_type : undefined,
-    updatedAt: Date.now(),
-  };
-}
-
-function parseSSE(body: string): SSEData[] {
-  const events: SSEData[] = [];
-  let currentEvent = "";
-  let currentData = "";
-
-  for (const line of body.split("\n")) {
-    if (line.startsWith("event: ")) {
-      currentEvent = line.slice(7).trim();
-    } else if (line.startsWith("data: ")) {
-      currentData = line.slice(6);
-    } else if (line === "") {
-      if (currentData) {
-        events.push({ event: currentEvent, data: currentData });
-      }
-      currentEvent = "";
-      currentData = "";
-    }
-  }
-
-  if (currentData) {
-    events.push({ event: currentEvent, data: currentData });
-  }
-
-  return events;
-}
-
-function extractQuotaFromErrorBody(body: string): QuotaSnapshot | undefined {
-  try {
-    const json = JSON.parse(body);
-    const resetsAtField =
-      json?.error?.details?.resets_at ??
-      json?.error?.resets_at ??
-      json?.resets_at;
-    if (typeof resetsAtField !== "undefined") {
-      const epoch =
-        typeof resetsAtField === "number"
-          ? resetsAtField < 1_000_000_000_000
-            ? resetsAtField * 1000
-            : resetsAtField
-          : new Date(String(resetsAtField)).getTime();
-      if (Number.isFinite(epoch)) {
-        return { primary: { resetsAt: epoch }, updatedAt: Date.now() };
-      }
-    }
-  } catch { /* ignore parse errors */ }
-  return undefined;
-}
-
-function extractQuotaFromHeaders(headers: Headers): QuotaSnapshot | undefined {
-  const remaining =
-    headers.get("x-ratelimit-remaining-requests") ??
-    headers.get("x-ratelimit-remaining-tokens") ??
-    headers.get("x-ratelimit-remaining") ??
-    headers.get("ratelimit-remaining");
-  const reset =
-    headers.get("x-ratelimit-reset-requests") ??
-    headers.get("x-ratelimit-reset-tokens") ??
-    headers.get("x-ratelimit-reset") ??
-    headers.get("ratelimit-reset");
-  if (remaining || reset) {
-    const snapshot: QuotaSnapshot = { updatedAt: Date.now() };
-    const primary: { usedPercent?: number; resetsAt?: number } = {};
-    if (remaining) {
-      const n = parseInt(remaining, 10);
-      if (Number.isFinite(n)) primary.usedPercent = Math.max(0, Math.min(100, 100 - n));
-    }
-    if (reset) {
-      const epoch = parseInt(reset, 10);
-      if (Number.isFinite(epoch)) primary.resetsAt = epoch * 1000;
-    }
-    if (primary.usedPercent !== undefined || primary.resetsAt !== undefined) {
-      snapshot.primary = primary;
-    }
-    return snapshot;
-  }
-  return undefined;
-}
-
-function buildChatCompletionFromSSE(
-  events: SSEData[],
-  model: string,
-): Record<string, unknown> {
-  let fullText = "";
-  let responseId = `chatcmpl-${crypto.randomUUID()}`;
-  let created = Math.floor(Date.now() / 1000);
-  let usage: Record<string, number> = {};
-
-  for (const evt of events) {
-    try {
-      const parsed = JSON.parse(evt.data);
-
-      if (evt.event === "response.output_text.delta") {
-        fullText += parsed.delta || "";
-      }
-
-      if (evt.event === "response.completed" && parsed.response) {
-        created = parsed.response.created_at;
-        if (parsed.response.id) responseId = parsed.response.id;
-        if (parsed.response.usage) {
-          usage = {
-            prompt_tokens: parsed.response.usage.input_tokens || 0,
-            completion_tokens: parsed.response.usage.output_tokens || 0,
-            total_tokens: parsed.response.usage.total_tokens || 0,
-          };
-        }
-      }
-    } catch { /* skip malformed events */ }
-  }
-
-  return {
-    id: responseId,
-    object: "chat.completion",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: fullText,
-        },
-        finish_reason: "stop",
-      },
-    ],
-    usage,
-  };
-}
-
-function toResponsesBody(chatBody: Record<string, unknown>): Record<string, unknown> {
-  const messages = (chatBody.messages as Array<Record<string, unknown>>) || [];
-
-  let instructions = "You are a helpful assistant.";
-  const filteredMessages = messages.filter((m) => {
-    if (m.role === "system") {
-      instructions = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
-      return false;
-    }
-    return true;
-  });
-
-  const input = filteredMessages.map((m) => ({
-    role: m.role,
-    content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
-  }));
-
-  const body: Record<string, unknown> = {
-    model: chatBody.model,
-    input,
-    instructions,
-    store: false,
-    stream: true,
-  };
-
-  const effort =
-    typeof chatBody.reasoningEffort === "string" ? chatBody.reasoningEffort
-      : typeof chatBody.reasoning_effort === "string" ? chatBody.reasoning_effort
-        : undefined;
-  if (effort && REASONING_VARIANTS.includes(effort as typeof REASONING_VARIANTS[number])) {
-    body.reasoning = { effort };
-  }
-
-  return body;
-}
-
-async function wrapSSEAsChatCompletion(
-  sseResponse: Response,
-  model: string | undefined,
-): Promise<Response> {
-  const sseText = await sseResponse.text();
-  const events = parseSSE(sseText);
-  const completion = buildChatCompletionFromSSE(events, model || "");
-  return new Response(JSON.stringify(completion), {
-    status: 200,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-const CODEX_INSTALLATION_ID: string | undefined = (() => {
-  try {
-    const p = join(homedir(), ".codex", "installation_id");
-    if (existsSync(p)) return readFileSync(p, "utf-8").trim();
-  } catch { /* best-effort */ }
-  return undefined;
-})();
-
-function traceparent(): string {
-  const traceId = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
-  const spanId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-  return `00-${traceId}-${spanId}-01`;
-}
 
 function extractModel(body: string | undefined): string | undefined {
   if (!body) return undefined;
@@ -269,32 +28,6 @@ function extractModel(body: string | undefined): string | undefined {
   }
 }
 
-function buildAuthHeaders(
-  init: RequestInit | undefined,
-  account: ManagedAccount,
-): Headers {
-  const headers = new Headers(init?.headers);
-  const bearerToken = account.apiKey ?? account.access;
-  headers.delete("authorization");
-  headers.delete("Authorization");
-  headers.delete("openai-authorization");
-  headers.set("authorization", `Bearer ${bearerToken}`);
-  headers.set("openai-authorization", `Bearer ${bearerToken}`);
-
-  if (account.accountId) {
-    headers.set("chatgpt-account-id", account.accountId);
-  }
-
-  headers.set("user-agent", "Codex/codex_cli_rs");
-  headers.set("x-client-request-id", crypto.randomUUID());
-  if (CODEX_INSTALLATION_ID) {
-    headers.set("x-codex-installation-id", CODEX_INSTALLATION_ID);
-  }
-  headers.set("traceparent", traceparent());
-
-  return headers;
-}
-
 export function createOpenAILoader(options: {
   cfg: PluginConfig;
   manager: AccountManager;
@@ -303,39 +36,10 @@ export function createOpenAILoader(options: {
   showToast: (message: string, variant?: "info" | "warning" | "error") => Promise<void>;
 }): () => Promise<Record<string, unknown>> {
   const { cfg, manager, client, fetchWithTimeout, showToast } = options;
+  const refreshQuota = createQuotaRefresher({ cfg, manager, fetchWithTimeout });
   let lastToastAccount = -1;
   let lastToastTime = 0;
   const toastDebounce = 5000;
-
-  async function refreshQuota(account: ManagedAccount, model: string | undefined): Promise<boolean> {
-    if (!account.access || !account.accountId) return false;
-
-    try {
-      const response = await fetchWithTimeout(WHAM_USAGE_ENDPOINT, {
-        headers: {
-          authorization: `Bearer ${account.access}`,
-          "chatgpt-account-id": account.accountId,
-          "user-agent": "Codex/codex_cli_rs",
-        },
-      }, 10_000);
-      if (!response.ok) {
-        if (cfg.debug) {
-          console.log(`[multi-auth] Quota refresh failed for ${account.label || account.email || account.index}: ${response.status}`);
-        }
-        return false;
-      }
-
-      const quota = parseWhamUsage(await response.json());
-      if (!quota) return false;
-      manager.updateQuota(account, quota, model);
-      return true;
-    } catch (error) {
-      if (cfg.debug) {
-        console.log(`[multi-auth] Quota refresh error for ${account.label || account.email || account.index}: ${String(error)}`);
-      }
-      return false;
-    }
-  }
 
   return async function openAILoader(): Promise<Record<string, unknown>> {
     async function customFetch(
@@ -388,7 +92,13 @@ export function createOpenAILoader(options: {
 
       let account = await manager.select(model);
       if (!account) {
-        return retryAfterResponse("No available OpenAI accounts");
+        for (const blocked of manager.list()) {
+          await refreshQuota(blocked, model);
+        }
+        account = await manager.select(model);
+        if (!account) {
+          return retryAfterResponse("No available OpenAI accounts");
+        }
       }
 
       if (!cfg.quietMode && manager.count() > 1) {
@@ -821,21 +531,4 @@ export function createOpenAILoader(options: {
       fetch: customFetch,
     };
   };
-}
-
-export function registerOpenAIModels(models: Record<string, unknown>): void {
-  for (const id of CODEX_MODELS) {
-    if (!models[id]) {
-      models[id] = { name: id };
-    }
-    if (id.startsWith("gpt-")) {
-      const model = models[id] as Record<string, unknown> & {
-        variants?: Record<string, Record<string, unknown>>;
-      };
-      model.variants = {
-        ...(model.variants ?? {}),
-        ...REASONING_VARIANT_CONFIG,
-      };
-    }
-  }
 }

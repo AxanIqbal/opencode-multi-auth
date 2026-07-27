@@ -13,8 +13,17 @@ OpenCode plugin that overrides provider `openai` with multi-account rotation. It
 ```text
 opencode-multi-auth/
 ├── src/index.ts             # Plugin factory, provider selection, auth flows, account tools
-├── src/providers/openai.ts  # OpenAI/Codex loader, Responses conversion, rotation fetch pipeline
-├── src/providers/google.ts  # Google/Gemini loader, API-key injection and rotation fetch pipeline
+├── src/providers/openai/    # OpenAI/Codex provider (isolated module)
+│   ├── index.ts             # Public facade (loader, models)
+│   ├── loader.ts            # Fetch pipeline, rotation, retries, response wrapping
+│   ├── request.ts           # Chat Completions to Responses body conversion
+│   ├── models.ts            # Model registry and reasoning variants
+│   ├── headers.ts           # Auth headers and Codex fingerprints
+│   ├── quota.ts             # Usage and quota management
+│   └── AGENTS.md            # Scoped operational guide
+├── src/providers/google/    # Google/Gemini provider (isolated module)
+│   ├── index.ts             # Public facade, aliasing, API-key injection, rotation
+│   └── AGENTS.md            # Scoped operational guide
 ├── src/accounts/manager.ts  # Account pool, selection, cooldowns, token refresh/API-key persistence merge
 ├── src/accounts/types.ts    # ManagedAccount, API-key field, quota, config, store interfaces
 ├── src/auth/tokens.ts       # JWT claim reads, OAuth refresh, URL rewrite, retry-after parsing
@@ -29,11 +38,11 @@ opencode-multi-auth/
 | Task | Location | Notes |
 |------|----------|-------|
 | Provider override/plugin entry | `src/index.ts:397` | `MultiAuthPlugin` constructs manager, auth flows, loader. |
-| Chat Completions to Responses body | `src/providers/openai.ts` | `toResponsesBody`; keeps only first system message as instructions. |
-| OpenAI/Codex fetch interception | `src/providers/openai.ts` | `createOpenAILoader` handles custom fetch, account choice, retries, and response wrapping. |
-| SSE to chat.completion JSON | `src/providers/openai.ts` | `buildChatCompletionFromSSE`; output text deltas only. |
-| Google/Gemini fetch interception | `src/providers/google.ts` | `createGoogleLoader` injects API keys and rotates Google accounts. |
-| Gemini routing branch | `src/providers/google.ts` | `gemini-*` model IDs use Google API-key pool and Google `generateContent`. |
+| Chat Completions to Responses body | `src/providers/openai/request.ts` | `toResponsesBody`; keeps only last system message as instructions. |
+| OpenAI/Codex fetch interception | `src/providers/openai/loader.ts` | `createOpenAILoader` handles custom fetch, account choice, retries, and response wrapping. |
+| SSE to chat.completion JSON | `src/providers/openai/request.ts` | `buildChatCompletionFromSSE`; output text deltas only. |
+| Google/Gemini fetch interception | `src/providers/google/index.ts` | `createGoogleLoader` injects API keys and rotates Google accounts. |
+| Gemini routing branch | `src/providers/google/index.ts` | `gemini-*` model IDs use Google API-key pool and Google `generateContent`. |
 | Retry-After fallback response | `src/index.ts:450` | Must always set a retry header, even without known reset. |
 | Rate-limit rotation loop | `src/index.ts:611` | Handles 429, 503, 529; marks cooldown then tries other accounts. |
 | Auth error fallback | `src/index.ts:741` | 401 refreshes token, then rotates if needed. |
@@ -58,11 +67,11 @@ opencode-multi-auth/
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
 | `MultiAuthPlugin` | plugin export | `src/index.ts:397` | Provider replacement and auth registration. |
-| `createOpenAILoader` | function | `src/providers/openai.ts` | OpenAI request rewrite, account choice, retries, response wrapping. |
-| `createGoogleLoader` | function | `src/providers/google.ts` | Google API-key injection, account choice, retries. |
+| `createOpenAILoader` | function | `src/providers/openai/loader.ts` | OpenAI request rewrite, account choice, retries, response wrapping. |
+| `createGoogleLoader` | function | `src/providers/google/index.ts` | Google API-key injection, account choice, retries. |
 | `AccountManager` | class | `src/accounts/manager.ts:10` | Persistent account pool and health state. |
 | `ManagedAccount` | interface | `src/accounts/types.ts:18` | On-disk and in-memory account shape; includes OpenAI tokens or Google API key. |
-| `GEMINI_MODELS` | const | `src/providers/google.ts:5` | Registered Google/Gemini/Gemma aliases exposed under `google/`. |
+| `GEMINI_MODELS` | const | `src/providers/google/index.ts:5` | Registered Google/Gemini/Gemma aliases exposed under `google/`. |
 | `PluginConfig` | interface | `src/accounts/types.ts:66` | Env-derived behavior toggles. |
 | `parseRetryAfter` | function | `src/auth/tokens.ts:190` | Converts provider reset hints into cooldown ms. |
 | `writeJSON` | function | `src/lib/storage.ts:46` | Secure JSON writer with restricted permissions. |
@@ -110,12 +119,13 @@ opencode run -m google/gemini-2.5-flash "hello"
 ## NOTES
 
 - `src/index.ts` is now the plugin shell: provider selection, auth methods, account tools, config hook, PKCE OAuth, local callback server, and browser launch live there. Provider fetch pipelines live in `src/providers/`.
-- OAuth helper functions are below `export default MultiAuthPlugin`; valid because they are function declarations, but unusual for navigation.
-- No test suite, lint config, formatter config, hooks, or CI is configured; use `bun run typecheck`, `bun run build`, and a real `opencode run -m openai/...` smoke test after behavior changes.
+- OpenAI and Google providers are isolated into their own modules under `src/providers/` with dedicated `index.ts` facades and scoped `AGENTS.md` guides.
+- Provider isolation and characterization are verified via Bun tests in `tests/`; no lint config, formatter config, hooks, or CI is configured. Use `bun test` for regression, `bun run typecheck` for types, and `bun run build` for delivery.
+- Provider isolation is verified by `tests/google-provider-isolation.test.ts` and `tests/openai-provider-characterization.test.ts`.
 - This project uses Bun. Keep `bun.lock` authoritative and avoid adding npm lockfiles.
-- Available OpenAI/Codex models are registered via `src/providers/openai.ts` and documented in `README.md`: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`, each GPT model with reasoning variants.
-- Available Google aliases are registered in `src/providers/google.ts` and documented in `README.md`; user-facing command syntax is `google/<alias>`, e.g. `google/gemini-2.5-flash`.
-- The compact repo does not warrant child AGENTS.md files yet: `src/accounts` is dense but only two files; `src/auth` and `src/lib` are single-purpose.
+- Available OpenAI/Codex models are registered via `src/providers/openai/models.ts` and documented in `README.md`: `gpt-5.5`, `gpt-5.4-mini`, `codex-auto-review`, each GPT model with reasoning variants.
+- Available Google aliases are registered in `src/providers/google/index.ts` and documented in `README.md`; user-facing command syntax is `google/<alias>`, e.g. `google/gemini-2.5-flash`.
+- Scoped guides: `src/providers/openai/AGENTS.md` and `src/providers/google/AGENTS.md` contain detailed operational flows for each provider.
 - Storage paths: OpenAI accounts at `~/.config/opencode/openai-accounts.json`, Google API keys at `~/.config/opencode/google-accounts.json`, OpenCode auth import at `~/.local/share/opencode/auth.json`, session state at `~/.local/share/opencode/instance.json`.
 - `scripts/install.js` still uses `execSync("opencode auth login")`; the shell-free `execFileSync` convention currently applies to browser launch in `src/index.ts`.
 - Update AGENTS.md if necessary

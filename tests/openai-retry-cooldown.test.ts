@@ -15,7 +15,7 @@ function runRetryScenario(): { status: number; retryAfter: string | null; cooldo
       `
         import { AccountManager } from "./src/accounts/manager.ts";
         import { DEFAULT_CONFIG } from "./src/accounts/types.ts";
-        import { createOpenAILoader } from "./src/providers/openai.ts";
+        import { createOpenAILoader } from "./src/providers/openai/index.ts";
 
         const manager = new AccountManager(DEFAULT_CONFIG, ${JSON.stringify(join(testRoot, "accounts.json"))});
         manager.addApiKey("sk-test");

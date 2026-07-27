@@ -34,8 +34,8 @@ import {
   extractPlanType,
 } from "./auth/tokens.js";
 import { GOOGLE_ACCOUNTS_FILE } from "./lib/storage.js";
-import { createGoogleLoader, GEMINI_MODELS } from "./providers/google.js";
-import { createOpenAILoader, registerOpenAIModels } from "./providers/openai.js";
+import { createGoogleLoader, GEMINI_MODELS } from "./providers/google/index.js";
+import { createOpenAILoader, registerOpenAIModels } from "./providers/openai/index.js";
 
 // ── Constants ──────────────────────────────────────────────
 

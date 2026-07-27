@@ -161,7 +161,7 @@ function googleLoaderDoesNotImportAuthScript(): string {
     import { AccountManager } from "./src/accounts/manager.ts";
     import { resolveConfig } from "./src/accounts/types.ts";
     import { GOOGLE_ACCOUNTS_FILE } from "./src/lib/storage.ts";
-    import { createGoogleLoader } from "./src/providers/google.ts";
+    import { createGoogleLoader } from "./src/providers/google/index.ts";
 
     const home = process.env.HOME;
     const authDir = join(home, ".local", "share", "opencode");

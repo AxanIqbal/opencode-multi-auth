@@ -429,6 +429,25 @@ export class AccountManager {
     }
   }
 
+  /** Clear a stale cooldown after a live quota check confirms capacity. */
+  clearRateLimit(account: ManagedAccount, model?: string): void {
+    const target = this.resolveAccount(account);
+    if (model && this.config.perModelRateLimits) {
+      if (!(model in target.rateLimitResets)) return;
+      target.rateLimitResets[model] = 0;
+    } else {
+      if (!target.globalRateLimitReset) return;
+      target.globalRateLimitReset = 0;
+    }
+    this.save();
+    const saved = this.resolveAccount(account);
+    if (model && this.config.perModelRateLimits) {
+      delete saved.rateLimitResets[model];
+    } else {
+      delete saved.globalRateLimitReset;
+    }
+  }
+
   updateQuota(account: ManagedAccount, snapshot: QuotaSnapshot, model?: string): void {
     const target = this.resolveAccount(account);
     target.quota = snapshot;
