@@ -103,6 +103,7 @@ export type TokenRefreshOutcome = TokenRefreshResult | TokenRefreshError;
  */
 export async function refreshAccessToken(
   refreshToken: string,
+  signal?: AbortSignal,
 ): Promise<TokenRefreshOutcome> {
   try {
     const body = new URLSearchParams({
@@ -115,6 +116,7 @@ export async function refreshAccessToken(
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
+      signal,
     });
 
     if (!res.ok) {

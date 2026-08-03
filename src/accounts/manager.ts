@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { refreshAccessToken, extractTokenInfo } from "../auth/tokens.js";
 import { ACCOUNTS_FILE, OPENCODE_AUTH_FILE, readJSON, writeJSON } from "../lib/storage.js";
 import type { ManagedAccount, AccountsStore, PluginConfig, QuotaSnapshot } from "./types.js";
@@ -510,14 +512,77 @@ export class AccountManager {
     }) ?? null;
   }
 
+  private async withRefreshLock<T>(
+    account: ManagedAccount,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const identity = account.id ?? (
+      account.userId && account.accountId
+        ? `${account.userId}/${account.accountId}`
+        : account.refresh
+    );
+    if (!identity) throw new Error("Cannot lock an account without an identity");
+
+    const lockPath = `${this.accountsFile}.${createHash("sha256").update(identity).digest("hex")}.refresh.lock`;
+    const staleAfterMs = this.config.fetchTimeoutMs + 60_000;
+    while (true) {
+      try {
+        await mkdir(lockPath, { mode: 0o700 });
+        break;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) {
+          throw error;
+        }
+
+        try {
+          const lock = await stat(lockPath);
+          if (Date.now() - lock.mtimeMs > staleAfterMs) {
+            await rm(lockPath, { recursive: true, force: true });
+            continue;
+          }
+        } catch (statError) {
+          if (!(statError instanceof Error && "code" in statError && statError.code === "ENOENT")) {
+            throw statError;
+          }
+        }
+
+        await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      }
+    }
+
+    try {
+      return await operation();
+    } finally {
+      await rm(lockPath, { recursive: true, force: true });
+    }
+  }
+
   private async _doRefresh(account: ManagedAccount): Promise<boolean> {
+    return this.withRefreshLock(account, async () => {
     try {
       if (!account.refresh) return false;
 
       const latest = this.readLatestAccount(account);
+      if (
+        latest?.access &&
+        latest.expires &&
+        latest.expires > Date.now() + this.config.proactiveRefreshThresholdMs
+      ) {
+        account.access = latest.access;
+        account.refresh = latest.refresh;
+        account.expires = latest.expires;
+        account.consecutiveFailures = 0;
+        account.lastRefreshError = undefined;
+        account.isRefreshing = false;
+        account.refreshPromise = undefined;
+        return true;
+      }
       const refreshToken = latest?.refresh ?? account.refresh;
 
-      const result = await refreshAccessToken(refreshToken);
+      const result = await refreshAccessToken(
+        refreshToken,
+        AbortSignal.timeout(this.config.fetchTimeoutMs),
+      );
       if (result.type === "success") {
         account.access = result.access;
         account.refresh = result.refresh;
@@ -578,9 +643,10 @@ export class AccountManager {
       }
       return false;
     } catch (err) {
-      this.markRefreshFailed(account, String(err));
+      this.markRefreshFailed(account, err instanceof Error ? err.message : String(err));
       return false;
     }
+    });
   }
 
   // ── Session binding ──────────────────────────────────────
