@@ -11,4 +11,5 @@ auth.json
 /dist
 .idea
 
-.omo/run-continuation
+.omo
+.debug-journal.md
