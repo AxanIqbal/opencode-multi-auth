@@ -121,8 +121,14 @@ export async function refreshAccessToken(
       const text = await res.text().catch(() => "");
       let code: string | undefined;
       try {
-        const json = JSON.parse(text);
-        code = json.error;
+        const json: unknown = JSON.parse(text);
+        if (typeof json === "object" && json !== null && "error" in json) {
+          const error = json.error;
+          if (typeof error === "string") code = error;
+          if (typeof error === "object" && error !== null && "code" in error) {
+            if (typeof error.code === "string") code = error.code;
+          }
+        }
       } catch { /* ignore parse errors */ }
 
       if (code === "invalid_grant" || code === "refresh_token_reused") {
