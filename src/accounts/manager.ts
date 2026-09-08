@@ -193,6 +193,7 @@ export class AccountManager {
       if (email) existing.email = email;
       if (label) existing.label = label;
       existing.consecutiveFailures = 0;
+      existing.lastRefreshError = undefined;
       this.strategyInitialized = false;
       if (!this.config.quietMode) {
         console.log(`[multi-auth] Updated account: ${label || email || existing.index}`);
@@ -243,6 +244,7 @@ export class AccountManager {
         changed = true;
       }
       existing.consecutiveFailures = 0;
+      existing.lastRefreshError = undefined;
       this.strategyInitialized = false;
       if (!changed) return existing;
       if (!this.config.quietMode) {
