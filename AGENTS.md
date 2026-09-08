@@ -44,9 +44,9 @@ opencode-multi-auth/
 | Google/Gemini fetch interception | `src/providers/google/index.ts` | `createGoogleLoader` injects API keys and rotates Google accounts. |
 | Gemini routing branch | `src/providers/google/index.ts` | `gemini-*` model IDs use Google API-key pool and Google `generateContent`. |
 | Retry-After fallback response | `src/index.ts:450` | Must always set a retry header, even without known reset. |
-| Rate-limit rotation loop | `src/index.ts:611` | Handles 429, 503, 529; marks cooldown then tries other accounts. |
-| Auth error fallback | `src/index.ts:741` | 401 refreshes token, then rotates if needed. |
-| Model unsupported fallback | `src/index.ts:826` | 400 tries another account. |
+| Rate-limit rotation loop | `src/providers/openai/loader.ts` | Handles 429, 503, 529; marks cooldown then tries other accounts. |
+| Auth error fallback | `src/providers/openai/loader.ts` | 401 refreshes token, retries once, then rotates through the whole pool. |
+| Model unsupported fallback | `src/providers/openai/loader.ts` | 400 tries another account. |
 | OAuth/API-key UI flows | `src/index.ts:882` | Auto, manual code, paste-token, OpenAI API-key fallback, and Google API-key auth entries. |
 | Google API-key auth | `src/index.ts:1260` | Adds keys to the separate Google account store. |
 | Built-in Google auth import | `src/accounts/manager.ts:119` / `src/index.ts:1164` / `src/index.ts:579` / `src/index.ts:1303` | Imports current `auth.json` provider `google` API key into `google-accounts.json` on plugin dispose, before Gemini requests, or before account listing. |

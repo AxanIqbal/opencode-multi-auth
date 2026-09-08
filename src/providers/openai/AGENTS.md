@@ -25,7 +25,7 @@ Handles OpenAI and Codex model requests. Responsible for model registration, req
 ## Branch Conditions
 - **Chat Endpoint**: Requests to `/v1/chat/completions` or `/chat/completions` trigger the Responses API transformation.
 - **Rate Limit**: Status 429, 503, or 529 triggers cooldown marking and rotation.
-- **Auth Error**: Status 401 triggers `ensureValidToken` (can no-op if token is fresh) and one same-account retry. If the retry is non-ok, it is returned directly. A fallback to a next account occurs only if the initial refresh fails or the same-account retry hits a network error.
+- **Auth Error**: Status 401 triggers `ensureValidToken` (can no-op if token is fresh) and one same-account retry. If the retry is non-ok, the loader rotates through the remaining eligible accounts, trying each once; rate-limited fallbacks are marked and skipped. If every account fails auth, the original 401 response is returned as the last resort.
 - **Model Error**: Status 400 (unsupported model) attempts a single fallback to one next eligible account.
 
 ## AccountManager State Effects
@@ -46,7 +46,7 @@ Handles OpenAI and Codex model requests. Responsible for model registration, req
 - Manual QA: `opencode run -m openai/gpt-5.5 "test"` must return a valid JSON completion.
 
 ## Per-file Logical Limit
-- `loader.ts`: 490 logical lines (Complies with the ~500 line limit).
+- `loader.ts`: 482 logical lines (Complies with the ~500 line limit).
 - All other files are well within the limit.
 
 ## Mandatory Update Rule

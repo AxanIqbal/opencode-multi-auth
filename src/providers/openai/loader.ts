@@ -399,60 +399,48 @@ export function createOpenAILoader(options: {
 
       if (response.status === 401) {
         if (cfg.debug) console.log("[multi-auth] 401, forcing token refresh");
+        const authExcluded = new Set<number>([account.index]);
+
+        // Same-account retry after a forced refresh; success unwraps immediately,
+        // anything else falls through to full-pool rotation below.
         const refreshed = await manager.ensureValidToken(account);
         if (refreshed) {
-          let retryResponse: Response;
+          let retryResponse: Response | null = null;
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(account));
           } catch (err) {
-            manager.releasePending(account);
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${account.label || account.email || `acc-${account.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
-            const next = await selectQuotaEligible(new Set([account.index]));
-            if (next) {
-              await manager.ensureValidToken(next);
-              let retryResponse2: Response;
-              try {
-                retryResponse2 = await fetchWithTimeout(requestUrl, withAccount(next));
-              } catch (err2) {
-                manager.releasePending(next);
-                if (cfg.debug) {
-                  console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err2 instanceof Error ? err2.message : String(err2)}`);
-                }
-                return new Response(
-                  JSON.stringify({
-                    error: `Network error: ${err2 instanceof Error ? err2.message : String(err2)}`,
-                  }),
-                  { status: 502, headers: { "Content-Type": "application/json" } },
-                );
-              }
-              if (isChatEndpoint && retryResponse2.ok) {
-                manager.releasePending(next);
-                return wrapSSEAsChatCompletion(retryResponse2, model);
-              }
-              manager.releasePending(next);
-              return retryResponse2;
-            }
-            return new Response(
-              JSON.stringify({
-                error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-              { status: 502, headers: { "Content-Type": "application/json" } },
+          }
+          if (retryResponse?.ok) {
+            manager.releasePending(account);
+            return isChatEndpoint
+              ? wrapSSEAsChatCompletion(retryResponse, model)
+              : retryResponse;
+          }
+          if (retryResponse && isRateLimit(retryResponse.status)) {
+            const body = await retryResponse.clone().text().catch(() => undefined);
+            manager.markRateLimited(
+              account,
+              Math.min(parseRetryAfter(retryResponse, body), cfg.rateLimitCooldownMs),
+              model,
             );
           }
-          if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(account);
-            return wrapSSEAsChatCompletion(retryResponse, model);
-          }
-          manager.releasePending(account);
-          return retryResponse;
         }
+        manager.releasePending(account);
 
-        const next = await selectQuotaEligible(new Set([account.index]));
-        if (next) {
-          manager.releasePending(account);
-          await manager.ensureValidToken(next);
+        let next = await selectQuotaEligible(authExcluded, true);
+        while (next) {
+          if (!cfg.quietMode) {
+            const from = account.label || account.email || `Acct ${account.index + 1}`;
+            const to = next.label || next.email || `Acct ${next.index + 1}`;
+            showToast(`[multi-auth] Switching ${from} → ${to}`, "info");
+          }
+          if (cfg.debug) {
+            console.log(`[multi-auth] Auth rotation → ${next.label || next.email || `acc-${next.index}`} (${next.index + 1}/${manager.count()})`);
+          }
+
           let retryResponse: Response;
           try {
             retryResponse = await fetchWithTimeout(requestUrl, withAccount(next));
@@ -461,19 +449,29 @@ export function createOpenAILoader(options: {
             if (cfg.debug) {
               console.log(`[multi-auth] Network error on ${next.label || next.email || `acc-${next.index}`}: ${err instanceof Error ? err.message : String(err)}`);
             }
-            return new Response(
-              JSON.stringify({
-                error: `Network error: ${err instanceof Error ? err.message : String(err)}`,
-              }),
-              { status: 502, headers: { "Content-Type": "application/json" } },
+            authExcluded.add(next.index);
+            next = await selectQuotaEligible(authExcluded, true);
+            continue;
+          }
+
+          if (retryResponse.ok) {
+            manager.releasePending(next);
+            return isChatEndpoint
+              ? wrapSSEAsChatCompletion(retryResponse, model)
+              : retryResponse;
+          }
+
+          if (isRateLimit(retryResponse.status)) {
+            const body = await retryResponse.clone().text().catch(() => undefined);
+            manager.markRateLimited(
+              next,
+              Math.min(parseRetryAfter(retryResponse, body), cfg.rateLimitCooldownMs),
+              model,
             );
           }
-          if (isChatEndpoint && retryResponse.ok) {
-            manager.releasePending(next);
-            return wrapSSEAsChatCompletion(retryResponse, model);
-          }
           manager.releasePending(next);
-          return retryResponse;
+          authExcluded.add(next.index);
+          next = await selectQuotaEligible(authExcluded, true);
         }
 
         manager.releasePending(account);
